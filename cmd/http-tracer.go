@@ -1,24 +1,25 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2017 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
 import (
-	"context"
+	"bytes"
+	"io"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"reflect"
@@ -28,18 +29,64 @@ import (
 	"strings"
 	"time"
 
-	"github.com/minio/madmin-go/v3"
-	"github.com/minio/minio/internal/handlers"
-	xhttp "github.com/minio/minio/internal/http"
-	"github.com/minio/minio/internal/mcontext"
+	"github.com/gorilla/mux"
+	"github.com/minio/minio/cmd/logger"
+	"github.com/minio/minio/pkg/handlers"
+	jsonrpc "github.com/minio/minio/pkg/rpc"
+	trace "github.com/minio/minio/pkg/trace"
 )
+
+// recordRequest - records the first recLen bytes
+// of a given io.Reader
+type recordRequest struct {
+	// Data source to record
+	io.Reader
+	// Response body should be logged
+	logBody bool
+	// Internal recording buffer
+	buf bytes.Buffer
+	// request headers
+	headers http.Header
+	// total bytes read including header size
+	bytesRead int
+}
+
+func (r *recordRequest) Read(p []byte) (n int, err error) {
+	n, err = r.Reader.Read(p)
+	r.bytesRead += n
+
+	if r.logBody {
+		r.buf.Write(p[:n])
+	}
+	if err != nil {
+		return n, err
+	}
+	return n, err
+}
+func (r *recordRequest) Size() int {
+	sz := r.bytesRead
+	for k, v := range r.headers {
+		sz += len(k) + len(v)
+	}
+	return sz
+}
+
+// Return the bytes that were recorded.
+func (r *recordRequest) Data() []byte {
+	// If body logging is enabled then we return the actual body
+	if r.logBody {
+		return r.buf.Bytes()
+	}
+	// ... otherwise we return <BODY> placeholder
+	return logger.BodyPlaceHolder
+}
 
 var ldapPwdRegex = regexp.MustCompile("(^.*?)LDAPPassword=([^&]*?)(&(.*?))?$")
 
 // redact LDAP password if part of string
 func redactLDAPPwd(s string) string {
 	parts := ldapPwdRegex.FindStringSubmatch(s)
-	if len(parts) > 3 {
+	if len(parts) > 0 {
 		return parts[1] + "LDAPPassword=*REDACTED*" + parts[3]
 	}
 	return s
@@ -51,150 +98,160 @@ func getOpName(name string) (op string) {
 	op = strings.TrimSuffix(op, "Handler-fm")
 	op = strings.Replace(op, "objectAPIHandlers", "s3", 1)
 	op = strings.Replace(op, "adminAPIHandlers", "admin", 1)
-	op = strings.Replace(op, "(*storageRESTServer)", "storageR", 1)
-	op = strings.Replace(op, "(*peerRESTServer)", "peer", 1)
-	op = strings.Replace(op, "(*lockRESTServer)", "lockR", 1)
+	op = strings.Replace(op, "(*webAPIHandlers)", "web", 1)
+	op = strings.Replace(op, "(*storageRESTServer)", "internal", 1)
+	op = strings.Replace(op, "(*peerRESTServer)", "internal", 1)
+	op = strings.Replace(op, "(*lockRESTServer)", "internal", 1)
 	op = strings.Replace(op, "(*stsAPIHandlers)", "sts", 1)
-	op = strings.Replace(op, "(*peerS3Server)", "s3", 1)
-	op = strings.Replace(op, "ClusterCheckHandler", "health.Cluster", 1)
-	op = strings.Replace(op, "ClusterReadCheckHandler", "health.ClusterRead", 1)
-	op = strings.Replace(op, "LivenessCheckHandler", "health.Liveness", 1)
-	op = strings.Replace(op, "ReadinessCheckHandler", "health.Readiness", 1)
+	op = strings.Replace(op, "LivenessCheckHandler", "healthcheck", 1)
+	op = strings.Replace(op, "ReadinessCheckHandler", "healthcheck", 1)
 	op = strings.Replace(op, "-fm", "", 1)
 	return op
 }
 
-// If trace is enabled, execute the request if it is traced by other handlers
-// otherwise, generate a trace event with request information but no response.
-func httpTracerMiddleware(h http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Setup a http request response recorder - this is needed for
-		// http stats requests and audit if enabled.
-		respRecorder := xhttp.NewResponseRecorder(w)
+// WebTrace gets trace of web request
+func WebTrace(ri *jsonrpc.RequestInfo) trace.Info {
+	r := ri.Request
+	w := ri.ResponseWriter
 
-		// Setup a http request body recorder
-		reqRecorder := &xhttp.RequestRecorder{Reader: r.Body}
-		r.Body = reqRecorder
-
-		// Create tracing data structure and associate it to the request context
-		tc := mcontext.TraceCtxt{
-			AmzReqID:         w.Header().Get(xhttp.AmzRequestID),
-			RequestRecorder:  reqRecorder,
-			ResponseRecorder: respRecorder,
-		}
-
-		r = r.WithContext(context.WithValue(r.Context(), mcontext.ContextTraceKey, &tc))
-
-		reqStartTime := time.Now().UTC()
-		h.ServeHTTP(respRecorder, r)
-		reqEndTime := time.Now().UTC()
-
-		if globalTrace.NumSubscribers(madmin.TraceS3|madmin.TraceInternal) == 0 {
-			// no subscribers nothing to trace.
-			return
-		}
-
-		tt := madmin.TraceInternal
-		if strings.HasPrefix(tc.FuncName, "s3.") {
-			tt = madmin.TraceS3
-		}
-
-		// Calculate input body size with headers
-		reqHeaders := r.Header.Clone()
-		reqHeaders.Set("Host", r.Host)
-		if len(r.TransferEncoding) == 0 {
-			reqHeaders.Set("Content-Length", strconv.Itoa(int(r.ContentLength)))
-		} else {
-			reqHeaders.Set("Transfer-Encoding", strings.Join(r.TransferEncoding, ","))
-		}
-		inputBytes := reqRecorder.Size()
-		for k, v := range reqHeaders {
-			inputBytes += len(k) + len(v)
-		}
-
-		// Calculate node name
-		nodeName := r.Host
-		if globalIsDistErasure {
-			nodeName = globalLocalNodeName
-		}
-		if host, port, err := net.SplitHostPort(nodeName); err == nil {
-			if port == "443" || port == "80" {
-				nodeName = host
-			}
-		}
-
-		// Calculate reqPath
-		reqPath := r.URL.RawPath
-		if reqPath == "" {
-			reqPath = r.URL.Path
-		}
-
-		// Calculate function name
-		funcName := tc.FuncName
-		if funcName == "" {
-			funcName = "<unknown>"
-		}
-
-		t := madmin.TraceInfo{
-			TraceType: tt,
-			FuncName:  funcName,
-			NodeName:  nodeName,
-			Time:      reqStartTime,
-			Duration:  reqEndTime.Sub(respRecorder.StartTime),
-			Path:      reqPath,
-			Bytes:     int64(inputBytes + respRecorder.Size()),
-			HTTP: &madmin.TraceHTTPStats{
-				ReqInfo: madmin.TraceRequestInfo{
-					Time:     reqStartTime,
-					Proto:    r.Proto,
-					Method:   r.Method,
-					RawQuery: redactLDAPPwd(r.URL.RawQuery),
-					Client:   handlers.GetSourceIP(r),
-					Headers:  reqHeaders,
-					Path:     reqPath,
-					Body:     reqRecorder.Data(),
-				},
-				RespInfo: madmin.TraceResponseInfo{
-					Time:       reqEndTime,
-					Headers:    respRecorder.Header().Clone(),
-					StatusCode: respRecorder.StatusCode,
-					Body:       respRecorder.Body(),
-				},
-				CallStats: madmin.TraceCallStats{
-					Latency:         reqEndTime.Sub(respRecorder.StartTime),
-					InputBytes:      inputBytes,
-					OutputBytes:     respRecorder.Size(),
-					TimeToFirstByte: respRecorder.TTFB(),
-				},
-			},
-		}
-
-		globalTrace.Publish(t)
-	})
-}
-
-func httpTrace(f http.HandlerFunc, logBody bool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		tc, ok := r.Context().Value(mcontext.ContextTraceKey).(*mcontext.TraceCtxt)
-		if !ok {
-			// Tracing is not enabled for this request
-			f.ServeHTTP(w, r)
-			return
-		}
-
-		tc.FuncName = getOpName(runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name())
-		tc.RequestRecorder.LogBody = logBody
-		tc.ResponseRecorder.LogAllBody = logBody
-		tc.ResponseRecorder.LogErrBody = true
-
-		f.ServeHTTP(w, r)
+	name := ri.Method
+	// Setup a http request body recorder
+	reqHeaders := r.Header.Clone()
+	reqHeaders.Set("Host", r.Host)
+	if len(r.TransferEncoding) == 0 {
+		reqHeaders.Set("Content-Length", strconv.Itoa(int(r.ContentLength)))
+	} else {
+		reqHeaders.Set("Transfer-Encoding", strings.Join(r.TransferEncoding, ","))
 	}
+
+	now := time.Now().UTC()
+	t := trace.Info{TraceType: trace.HTTP, FuncName: name, Time: now}
+	t.NodeName = r.Host
+	if globalIsDistErasure {
+		t.NodeName = globalLocalNodeName
+	}
+	if t.NodeName == "" {
+		t.NodeName = globalLocalNodeName
+	}
+
+	// strip only standard port from the host address
+	if host, port, err := net.SplitHostPort(t.NodeName); err == nil {
+		if port == "443" || port == "80" {
+			t.NodeName = host
+		}
+	}
+
+	vars := mux.Vars(r)
+	rq := trace.RequestInfo{
+		Time:     now,
+		Proto:    r.Proto,
+		Method:   r.Method,
+		Path:     SlashSeparator + pathJoin(vars["bucket"], vars["object"]),
+		RawQuery: redactLDAPPwd(r.URL.RawQuery),
+		Client:   handlers.GetSourceIP(r),
+		Headers:  reqHeaders,
+	}
+
+	rw, ok := w.(*logger.ResponseWriter)
+	if ok {
+		rs := trace.ResponseInfo{
+			Time:       time.Now().UTC(),
+			Headers:    rw.Header().Clone(),
+			StatusCode: rw.StatusCode,
+			Body:       logger.BodyPlaceHolder,
+		}
+
+		if rs.StatusCode == 0 {
+			rs.StatusCode = http.StatusOK
+		}
+
+		t.RespInfo = rs
+		t.CallStats = trace.CallStats{
+			Latency:         rs.Time.Sub(rw.StartTime),
+			InputBytes:      int(r.ContentLength),
+			OutputBytes:     rw.Size(),
+			TimeToFirstByte: rw.TimeToFirstByte,
+		}
+	}
+
+	t.ReqInfo = rq
+	return t
 }
 
-func httpTraceAll(f http.HandlerFunc) http.HandlerFunc {
-	return httpTrace(f, true)
-}
+// Trace gets trace of http request
+func Trace(f http.HandlerFunc, logBody bool, w http.ResponseWriter, r *http.Request) trace.Info {
+	name := getOpName(runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name())
 
-func httpTraceHdrs(f http.HandlerFunc) http.HandlerFunc {
-	return httpTrace(f, false)
+	// Setup a http request body recorder
+	reqHeaders := r.Header.Clone()
+	reqHeaders.Set("Host", r.Host)
+	if len(r.TransferEncoding) == 0 {
+		reqHeaders.Set("Content-Length", strconv.Itoa(int(r.ContentLength)))
+	} else {
+		reqHeaders.Set("Transfer-Encoding", strings.Join(r.TransferEncoding, ","))
+	}
+
+	reqBodyRecorder := &recordRequest{Reader: r.Body, logBody: logBody, headers: reqHeaders}
+	r.Body = ioutil.NopCloser(reqBodyRecorder)
+
+	now := time.Now().UTC()
+	t := trace.Info{TraceType: trace.HTTP, FuncName: name, Time: now}
+
+	t.NodeName = r.Host
+	if globalIsDistErasure {
+		t.NodeName = globalLocalNodeName
+	}
+
+	if t.NodeName == "" {
+		t.NodeName = globalLocalNodeName
+	}
+
+	// strip only standard port from the host address
+	if host, port, err := net.SplitHostPort(t.NodeName); err == nil {
+		if port == "443" || port == "80" {
+			t.NodeName = host
+		}
+	}
+
+	rq := trace.RequestInfo{
+		Time:     now,
+		Proto:    r.Proto,
+		Method:   r.Method,
+		Path:     r.URL.Path,
+		RawQuery: redactLDAPPwd(r.URL.RawQuery),
+		Client:   handlers.GetSourceIP(r),
+		Headers:  reqHeaders,
+	}
+
+	rw := logger.NewResponseWriter(w)
+	rw.LogErrBody = true
+	rw.LogAllBody = logBody
+
+	// Execute call.
+	f(rw, r)
+
+	rs := trace.ResponseInfo{
+		Time:       time.Now().UTC(),
+		Headers:    rw.Header().Clone(),
+		StatusCode: rw.StatusCode,
+		Body:       rw.Body(),
+	}
+
+	// Transfer request body
+	rq.Body = reqBodyRecorder.Data()
+
+	if rs.StatusCode == 0 {
+		rs.StatusCode = http.StatusOK
+	}
+
+	t.ReqInfo = rq
+	t.RespInfo = rs
+
+	t.CallStats = trace.CallStats{
+		Latency:         rs.Time.Sub(rw.StartTime),
+		InputBytes:      reqBodyRecorder.Size(),
+		OutputBytes:     rw.Size(),
+		TimeToFirstByte: rw.TimeToFirstByte,
+	}
+	return t
 }

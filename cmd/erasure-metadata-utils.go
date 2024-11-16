@@ -1,99 +1,30 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2016-2019 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
+	"fmt"
 	"hash/crc32"
 
-	"github.com/minio/pkg/v3/sync/errgroup"
+	"github.com/minio/minio/cmd/logger"
+	"github.com/minio/minio/pkg/sync/errgroup"
 )
-
-// counterMap type adds GetValueWithQuorum method to a map[T]int used to count occurrences of values of type T.
-type counterMap[T comparable] map[T]int
-
-// GetValueWithQuorum returns the first key which occurs >= quorum number of times.
-func (c counterMap[T]) GetValueWithQuorum(quorum int) (T, bool) {
-	var zero T
-	for x, count := range c {
-		if count >= quorum {
-			return x, true
-		}
-	}
-	return zero, false
-}
-
-// figure out the most commonVersions across disk that satisfies
-// the 'writeQuorum' this function returns "" if quorum cannot
-// be achieved and disks have too many inconsistent versions.
-func reduceCommonVersions(diskVersions [][]byte, writeQuorum int) (versions []byte) {
-	diskVersionsCount := make(map[uint64]int)
-	for _, versions := range diskVersions {
-		if len(versions) > 0 {
-			diskVersionsCount[binary.BigEndian.Uint64(versions)]++
-		}
-	}
-
-	var commonVersions uint64
-	maxCnt := 0
-	for versions, count := range diskVersionsCount {
-		if maxCnt < count {
-			maxCnt = count
-			commonVersions = versions
-		}
-	}
-
-	if maxCnt >= writeQuorum {
-		for _, versions := range diskVersions {
-			if binary.BigEndian.Uint64(versions) == commonVersions {
-				return versions
-			}
-		}
-	}
-
-	return []byte{}
-}
-
-// figure out the most commonVersions across disk that satisfies
-// the 'writeQuorum' this function returns '0' if quorum cannot
-// be achieved and disks have too many inconsistent versions.
-func reduceCommonDataDir(dataDirs []string, writeQuorum int) (dataDir string) {
-	dataDirsCount := make(map[string]int)
-	for _, ddir := range dataDirs {
-		dataDirsCount[ddir]++
-	}
-
-	maxCnt := 0
-	for ddir, count := range dataDirsCount {
-		if maxCnt < count {
-			maxCnt = count
-			dataDir = ddir
-		}
-	}
-
-	if maxCnt >= writeQuorum {
-		return dataDir
-	}
-
-	return ""
-}
 
 // Returns number of errors that occurred the most (incl. nil) and the
 // corresponding error value. NB When there is more than one error value that
@@ -107,37 +38,29 @@ func reduceErrs(errs []error, ignoredErrs []error) (maxCount int, maxErr error) 
 		if IsErrIgnored(err, ignoredErrs...) {
 			continue
 		}
-		// Errors due to context cancellation may be wrapped - group them by context.Canceled.
-		if errors.Is(err, context.Canceled) {
-			errorCounts[context.Canceled]++
-			continue
-		}
 		errorCounts[err]++
 	}
 
-	maxCnt := 0
+	max := 0
 	for err, count := range errorCounts {
 		switch {
-		case maxCnt < count:
-			maxCnt = count
+		case max < count:
+			max = count
 			maxErr = err
 
 		// Prefer `nil` over other error values with the same
 		// number of occurrences.
-		case maxCnt == count && err == nil:
+		case max == count && err == nil:
 			maxErr = err
 		}
 	}
-	return maxCnt, maxErr
+	return max, maxErr
 }
 
 // reduceQuorumErrs behaves like reduceErrs by only for returning
 // values of maximally occurring errors validated against a generic
 // quorum number that can be read or write quorum depending on usage.
 func reduceQuorumErrs(ctx context.Context, errs []error, ignoredErrs []error, quorum int, quorumErr error) error {
-	if contextCanceled(ctx) {
-		return context.Canceled
-	}
 	maxCount, maxErr := reduceErrs(errs, ignoredErrs)
 	if maxCount >= quorum {
 		return maxErr
@@ -193,13 +116,8 @@ func hashOrder(key string, cardinality int) []int {
 
 // Reads all `xl.meta` metadata as a FileInfo slice.
 // Returns error slice indicating the failed metadata reads.
-func readAllFileInfo(ctx context.Context, disks []StorageAPI, origbucket string, bucket, object, versionID string, readData, healing bool) ([]FileInfo, []error) {
+func readAllFileInfo(ctx context.Context, disks []StorageAPI, bucket, object, versionID string, readData bool) ([]FileInfo, []error) {
 	metadataArray := make([]FileInfo, len(disks))
-
-	opts := ReadOptions{
-		ReadData: readData,
-		Healing:  healing,
-	}
 
 	g := errgroup.WithNErrs(len(disks))
 	// Read `xl.meta` in parallel across disks.
@@ -209,11 +127,24 @@ func readAllFileInfo(ctx context.Context, disks []StorageAPI, origbucket string,
 			if disks[index] == nil {
 				return errDiskNotFound
 			}
-			metadataArray[index], err = disks[index].ReadVersion(ctx, origbucket, bucket, object, versionID, opts)
+			metadataArray[index], err = disks[index].ReadVersion(ctx, bucket, object, versionID, readData)
+			if err != nil {
+				if !IsErr(err, []error{
+					errFileNotFound,
+					errVolumeNotFound,
+					errFileVersionNotFound,
+					errDiskNotFound,
+				}...) {
+					logger.LogOnceIf(ctx, fmt.Errorf("Drive %s, path (%s/%s) returned an error (%w)",
+						disks[index], bucket, object, err),
+						disks[index].String())
+				}
+			}
 			return err
 		}, index)
 	}
 
+	// Return all the metadata.
 	return metadataArray, g.Wait()
 }
 
@@ -238,7 +169,7 @@ func shuffleDisksAndPartsMetadataByIndex(disks []StorageAPI, metaArr []FileInfo,
 			inconsistent++
 			continue
 		}
-		if meta.XLV1 != fi.XLV1 {
+		if len(fi.Data) != len(meta.Data) {
 			inconsistent++
 			continue
 		}
@@ -285,7 +216,10 @@ func shuffleDisksAndPartsMetadata(disks []StorageAPI, partsMetadata []FileInfo, 
 			// if object was ever written previously.
 			continue
 		}
-		if !init && fi.XLV1 != partsMetadata[index].XLV1 {
+		if !init && len(fi.Data) != len(partsMetadata[index].Data) {
+			// Check for length of data parts only when
+			// fi.ModTime is not empty - ModTime is always set,
+			// if object was ever written previously.
 			continue
 		}
 		blockIndex := distribution[index]
@@ -329,7 +263,7 @@ func shuffleDisks(disks []StorageAPI, distribution []int) (shuffledDisks []Stora
 // the corresponding error in errs slice is not nil
 func evalDisks(disks []StorageAPI, errs []error) []StorageAPI {
 	if len(errs) != len(disks) {
-		bugLogIf(GlobalContext, errors.New("unexpected drives/errors slice length"))
+		logger.LogIf(GlobalContext, errors.New("unexpected disks/errors slice length"))
 		return nil
 	}
 	newDisks := make([]StorageAPI, len(disks))
@@ -353,12 +287,15 @@ var (
 // returns error if totalSize is -1, partSize is 0, partIndex is 0.
 func calculatePartSizeFromIdx(ctx context.Context, totalSize int64, partSize int64, partIndex int) (currPartSize int64, err error) {
 	if totalSize < -1 {
+		logger.LogIf(ctx, errInvalidArgument)
 		return 0, errInvalidArgument
 	}
 	if partSize == 0 {
+		logger.LogIf(ctx, errPartSizeZero)
 		return 0, errPartSizeZero
 	}
 	if partIndex < 1 {
+		logger.LogIf(ctx, errPartSizeIndex)
 		return 0, errPartSizeIndex
 	}
 	if totalSize == -1 {

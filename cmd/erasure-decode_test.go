@@ -1,31 +1,31 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2016-2020 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
 import (
 	"bytes"
 	"context"
-	crand "crypto/rand"
 	"io"
 	"math/rand"
 	"testing"
 
-	"github.com/dustin/go-humanize"
+	crand "crypto/rand"
+
+	humanize "github.com/dustin/go-humanize"
 )
 
 func (a badDisk) ReadFile(ctx context.Context, volume string, path string, offset int64, buf []byte, verifier *BitrotVerifier) (n int64, err error) {
@@ -85,17 +85,19 @@ var erasureDecodeTests = []struct {
 
 func TestErasureDecode(t *testing.T) {
 	for i, test := range erasureDecodeTests {
-		setup, err := newErasureTestSetup(t, test.dataBlocks, test.onDisks-test.dataBlocks, test.blocksize)
+		setup, err := newErasureTestSetup(test.dataBlocks, test.onDisks-test.dataBlocks, test.blocksize)
 		if err != nil {
 			t.Fatalf("Test %d: failed to create test setup: %v", i, err)
 		}
 		erasure, err := NewErasure(context.Background(), test.dataBlocks, test.onDisks-test.dataBlocks, test.blocksize)
 		if err != nil {
+			setup.Remove()
 			t.Fatalf("Test %d: failed to create ErasureStorage: %v", i, err)
 		}
 		disks := setup.disks
 		data := make([]byte, test.data)
 		if _, err = io.ReadFull(crand.Reader, data); err != nil {
+			setup.Remove()
 			t.Fatalf("Test %d: failed to generate random test data: %v", i, err)
 		}
 
@@ -106,14 +108,17 @@ func TestErasureDecode(t *testing.T) {
 		buffer := make([]byte, test.blocksize, 2*test.blocksize)
 		writers := make([]io.Writer, len(disks))
 		for i, disk := range disks {
-			writers[i] = newBitrotWriter(disk, "", "testbucket", "object", erasure.ShardFileSize(test.data), writeAlgorithm, erasure.ShardSize())
+			writers[i] = newBitrotWriter(disk, "testbucket", "object",
+				erasure.ShardFileSize(test.data), writeAlgorithm, erasure.ShardSize(), false)
 		}
-		n, err := erasure.Encode(context.Background(), bytes.NewReader(data), writers, buffer, erasure.dataBlocks+1)
+		n, err := erasure.Encode(context.Background(), bytes.NewReader(data[:]), writers, buffer, erasure.dataBlocks+1)
 		closeBitrotWriters(writers)
 		if err != nil {
+			setup.Remove()
 			t.Fatalf("Test %d: failed to create erasure test file: %v", i, err)
 		}
 		if n != test.data {
+			setup.Remove()
 			t.Fatalf("Test %d: failed to create erasure test file", i)
 		}
 		for i, w := range writers {
@@ -144,7 +149,7 @@ func TestErasureDecode(t *testing.T) {
 		}
 		if err == nil {
 			if content := writer.Bytes(); !bytes.Equal(content, data[test.offset:test.offset+test.length]) {
-				t.Errorf("Test %d: read returns wrong file content.", i)
+				t.Errorf("Test %d: read retruns wrong file content.", i)
 			}
 		}
 
@@ -191,6 +196,7 @@ func TestErasureDecode(t *testing.T) {
 				}
 			}
 		}
+		setup.Remove()
 	}
 }
 
@@ -205,11 +211,12 @@ func TestErasureDecodeRandomOffsetLength(t *testing.T) {
 	dataBlocks := 7
 	parityBlocks := 7
 	blockSize := int64(1 * humanize.MiByte)
-	setup, err := newErasureTestSetup(t, dataBlocks, parityBlocks, blockSize)
+	setup, err := newErasureTestSetup(dataBlocks, parityBlocks, blockSize)
 	if err != nil {
 		t.Error(err)
 		return
 	}
+	defer setup.Remove()
 	disks := setup.disks
 	erasure, err := NewErasure(context.Background(), dataBlocks, parityBlocks, blockSize)
 	if err != nil {
@@ -228,7 +235,8 @@ func TestErasureDecodeRandomOffsetLength(t *testing.T) {
 		if disk == nil {
 			continue
 		}
-		writers[i] = newBitrotWriter(disk, "", "testbucket", "object", erasure.ShardFileSize(length), DefaultBitrotAlgorithm, erasure.ShardSize())
+		writers[i] = newBitrotWriter(disk, "testbucket", "object",
+			erasure.ShardFileSize(length), DefaultBitrotAlgorithm, erasure.ShardSize(), false)
 	}
 
 	// 10000 iterations with random offsets and lengths.
@@ -282,10 +290,11 @@ func TestErasureDecodeRandomOffsetLength(t *testing.T) {
 // Benchmarks
 
 func benchmarkErasureDecode(data, parity, dataDown, parityDown int, size int64, b *testing.B) {
-	setup, err := newErasureTestSetup(b, data, parity, blockSizeV2)
+	setup, err := newErasureTestSetup(data, parity, blockSizeV2)
 	if err != nil {
 		b.Fatalf("failed to create test setup: %v", err)
 	}
+	defer setup.Remove()
 	disks := setup.disks
 	erasure, err := NewErasure(context.Background(), data, parity, blockSizeV2)
 	if err != nil {
@@ -297,7 +306,8 @@ func benchmarkErasureDecode(data, parity, dataDown, parityDown int, size int64, 
 		if disk == nil {
 			continue
 		}
-		writers[i] = newBitrotWriter(disk, "", "testbucket", "object", erasure.ShardFileSize(size), DefaultBitrotAlgorithm, erasure.ShardSize())
+		writers[i] = newBitrotWriter(disk, "testbucket", "object",
+			erasure.ShardFileSize(size), DefaultBitrotAlgorithm, erasure.ShardSize(), false)
 	}
 
 	content := make([]byte, size)

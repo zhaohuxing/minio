@@ -1,43 +1,40 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2016, 2017, 2018 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
 import (
 	"bytes"
 	"encoding/xml"
-	"fmt"
-	"io"
+	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"testing"
 
-	"github.com/minio/minio/internal/auth"
+	"github.com/minio/minio/pkg/auth"
 )
 
 // Wrapper for calling RemoveBucket HTTP handler tests for both Erasure multiple disks and single node setup.
 func TestRemoveBucketHandler(t *testing.T) {
-	ExecObjectLayerAPITest(ExecObjectLayerAPITestArgs{t: t, objAPITest: testRemoveBucketHandler, endpoints: []string{"RemoveBucket"}})
+	ExecObjectLayerAPITest(t, testRemoveBucketHandler, []string{"RemoveBucket"})
 }
 
 func testRemoveBucketHandler(obj ObjectLayer, instanceType, bucketName string, apiRouter http.Handler,
-	credentials auth.Credentials, t *testing.T,
-) {
+	credentials auth.Credentials, t *testing.T) {
 	_, err := obj.PutObject(GlobalContext, bucketName, "test-object", mustGetPutObjReader(t, bytes.NewReader([]byte{}), int64(0), "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"), ObjectOptions{})
 	// if object upload fails stop the test.
 	if err != nil {
@@ -78,12 +75,12 @@ func testRemoveBucketHandler(obj ObjectLayer, instanceType, bucketName string, a
 
 // Wrapper for calling GetBucketPolicy HTTP handler tests for both Erasure multiple disks and single node setup.
 func TestGetBucketLocationHandler(t *testing.T) {
-	ExecObjectLayerAPITest(ExecObjectLayerAPITestArgs{t: t, objAPITest: testGetBucketLocationHandler, endpoints: []string{"GetBucketLocation"}})
+	ExecObjectLayerAPITest(t, testGetBucketLocationHandler, []string{"GetBucketLocation"})
 }
 
 func testGetBucketLocationHandler(obj ObjectLayer, instanceType, bucketName string, apiRouter http.Handler,
-	credentials auth.Credentials, t *testing.T,
-) {
+	credentials auth.Credentials, t *testing.T) {
+
 	// test cases with sample input and expected output.
 	testCases := []struct {
 		bucketName string
@@ -164,6 +161,7 @@ func testGetBucketLocationHandler(obj ObjectLayer, instanceType, bucketName stri
 		recV2 := httptest.NewRecorder()
 		// construct HTTP request for PUT bucket policy endpoint.
 		reqV2, err := newTestSignedRequestV2(http.MethodGet, getBucketLocationURL("", testCase.bucketName), 0, nil, testCase.accessKey, testCase.secretKey, nil)
+
 		if err != nil {
 			t.Fatalf("Test %d: %s: Failed to create HTTP request for PutBucketPolicyHandler: <ERROR> %v", i+1, instanceType, err)
 		}
@@ -210,6 +208,7 @@ func testGetBucketLocationHandler(obj ObjectLayer, instanceType, bucketName stri
 
 	nilBucket := "dummy-bucket"
 	nilReq, err := newTestRequest(http.MethodGet, getBucketLocationURL("", nilBucket), 0, nil)
+
 	if err != nil {
 		t.Errorf("MinIO %s: Failed to create HTTP request for testing the response when object Layer is set to `nil`.", instanceType)
 	}
@@ -220,12 +219,12 @@ func testGetBucketLocationHandler(obj ObjectLayer, instanceType, bucketName stri
 
 // Wrapper for calling HeadBucket HTTP handler tests for both Erasure multiple disks and single node setup.
 func TestHeadBucketHandler(t *testing.T) {
-	ExecObjectLayerAPITest(ExecObjectLayerAPITestArgs{t: t, objAPITest: testHeadBucketHandler, endpoints: []string{"HeadBucket"}})
+	ExecObjectLayerAPITest(t, testHeadBucketHandler, []string{"HeadBucket"})
 }
 
 func testHeadBucketHandler(obj ObjectLayer, instanceType, bucketName string, apiRouter http.Handler,
-	credentials auth.Credentials, t *testing.T,
-) {
+	credentials auth.Credentials, t *testing.T) {
+
 	// test cases with sample input and expected output.
 	testCases := []struct {
 		bucketName string
@@ -252,7 +251,7 @@ func testHeadBucketHandler(obj ObjectLayer, instanceType, bucketName string, api
 		},
 		// Test case - 3.
 		// Testing for signature mismatch error.
-		// setting invalid access and secret key.
+		// setting invalid acess and secret key.
 		{
 			bucketName:         bucketName,
 			accessKey:          "abcd",
@@ -281,6 +280,7 @@ func testHeadBucketHandler(obj ObjectLayer, instanceType, bucketName string, api
 		recV2 := httptest.NewRecorder()
 		// construct HTTP request for PUT bucket policy endpoint.
 		reqV2, err := newTestSignedRequestV2(http.MethodHead, getHEADBucketURL("", testCase.bucketName), 0, nil, testCase.accessKey, testCase.secretKey, nil)
+
 		if err != nil {
 			t.Fatalf("Test %d: %s: Failed to create HTTP request for PutBucketPolicyHandler: <ERROR> %v", i+1, instanceType, err)
 		}
@@ -295,6 +295,7 @@ func testHeadBucketHandler(obj ObjectLayer, instanceType, bucketName string, api
 
 	// Test for Anonymous/unsigned http request.
 	anonReq, err := newTestRequest(http.MethodHead, getHEADBucketURL("", bucketName), 0, nil)
+
 	if err != nil {
 		t.Fatalf("MinIO %s: Failed to create an anonymous request for bucket \"%s\": <ERROR> %v",
 			instanceType, bucketName, err)
@@ -312,6 +313,7 @@ func testHeadBucketHandler(obj ObjectLayer, instanceType, bucketName string, api
 
 	nilBucket := "dummy-bucket"
 	nilReq, err := newTestRequest(http.MethodHead, getHEADBucketURL("", nilBucket), 0, nil)
+
 	if err != nil {
 		t.Errorf("MinIO %s: Failed to create HTTP request for testing the response when object Layer is set to `nil`.", instanceType)
 	}
@@ -322,13 +324,13 @@ func testHeadBucketHandler(obj ObjectLayer, instanceType, bucketName string, api
 
 // Wrapper for calling TestListMultipartUploadsHandler tests for both Erasure multiple disks and single node setup.
 func TestListMultipartUploadsHandler(t *testing.T) {
-	ExecObjectLayerAPITest(ExecObjectLayerAPITestArgs{t: t, objAPITest: testListMultipartUploadsHandler, endpoints: []string{"ListMultipartUploads"}})
+	ExecObjectLayerAPITest(t, testListMultipartUploadsHandler, []string{"ListMultipartUploads"})
 }
 
 // testListMultipartUploadsHandler - Tests validate listing of multipart uploads.
 func testListMultipartUploadsHandler(obj ObjectLayer, instanceType, bucketName string, apiRouter http.Handler,
-	credentials auth.Credentials, t *testing.T,
-) {
+	credentials auth.Credentials, t *testing.T) {
+
 	// Collection of non-exhaustive ListMultipartUploads test cases, valid errors
 	// and success responses.
 	testCases := []struct {
@@ -355,7 +357,7 @@ func testListMultipartUploadsHandler(obj ObjectLayer, instanceType, bucketName s
 			maxUploads:         "0",
 			accessKey:          credentials.AccessKey,
 			secretKey:          credentials.SecretKey,
-			expectedRespStatus: http.StatusBadRequest,
+			expectedRespStatus: http.StatusNotFound,
 			shouldPass:         false,
 		},
 		// Test case - 2.
@@ -415,7 +417,7 @@ func testListMultipartUploadsHandler(obj ObjectLayer, instanceType, bucketName s
 			shouldPass:         false,
 		},
 		// Test case - 6.
-		// Setting a negative value to max-uploads parameter, should result in http.StatusBadRequest.
+		// Setting a negative value to max-uploads paramater, should result in http.StatusBadRequest.
 		{
 			bucket:             bucketName,
 			prefix:             "",
@@ -548,6 +550,7 @@ func testListMultipartUploadsHandler(obj ObjectLayer, instanceType, bucketName s
 		testCases[6].uploadIDMarker, testCases[6].delimiter, testCases[6].maxUploads)
 
 	nilReq, err := newTestRequest(http.MethodGet, url, 0, nil)
+
 	if err != nil {
 		t.Errorf("MinIO %s: Failed to create HTTP request for testing the response when object Layer is set to `nil`.", instanceType)
 	}
@@ -558,13 +561,13 @@ func testListMultipartUploadsHandler(obj ObjectLayer, instanceType, bucketName s
 
 // Wrapper for calling TestListBucketsHandler tests for both Erasure multiple disks and single node setup.
 func TestListBucketsHandler(t *testing.T) {
-	ExecObjectLayerAPITest(ExecObjectLayerAPITestArgs{t: t, objAPITest: testListBucketsHandler, endpoints: []string{"ListBuckets"}})
+	ExecObjectLayerAPITest(t, testListBucketsHandler, []string{"ListBuckets"})
 }
 
 // testListBucketsHandler - Tests validate listing of buckets.
 func testListBucketsHandler(obj ObjectLayer, instanceType, bucketName string, apiRouter http.Handler,
-	credentials auth.Credentials, t *testing.T,
-) {
+	credentials auth.Credentials, t *testing.T) {
+
 	testCases := []struct {
 		bucketName         string
 		accessKey          string
@@ -580,7 +583,7 @@ func testListBucketsHandler(obj ObjectLayer, instanceType, bucketName string, ap
 			expectedRespStatus: http.StatusOK,
 		},
 		// Test case - 2.
-		// Test case with invalid accessKey to produce and validate Signature Mismatch error.
+		// Test case with invalid accessKey to produce and validate Signature MisMatch error.
 		{
 			bucketName:         bucketName,
 			accessKey:          "abcd",
@@ -610,6 +613,7 @@ func testListBucketsHandler(obj ObjectLayer, instanceType, bucketName string, ap
 
 		// verify response for V2 signed HTTP request.
 		reqV2, err := newTestSignedRequestV2(http.MethodGet, getListBucketURL(""), 0, nil, testCase.accessKey, testCase.secretKey, nil)
+
 		if err != nil {
 			t.Fatalf("Test %d: %s: Failed to create HTTP request for PutBucketPolicyHandler: <ERROR> %v", i+1, instanceType, err)
 		}
@@ -624,6 +628,7 @@ func testListBucketsHandler(obj ObjectLayer, instanceType, bucketName string, ap
 	// Test for Anonymous/unsigned http request.
 	// ListBucketsHandler doesn't support bucket policies, setting the policies shouldn't make a difference.
 	anonReq, err := newTestRequest(http.MethodGet, getListBucketURL(""), 0, nil)
+
 	if err != nil {
 		t.Fatalf("MinIO %s: Failed to create an anonymous request.", instanceType)
 	}
@@ -639,6 +644,7 @@ func testListBucketsHandler(obj ObjectLayer, instanceType, bucketName string, ap
 	// The only aim is to generate an HTTP request in a way that the relevant/registered end point is evoked/called.
 
 	nilReq, err := newTestRequest(http.MethodGet, getListBucketURL(""), 0, nil)
+
 	if err != nil {
 		t.Errorf("MinIO %s: Failed to create HTTP request for testing the response when object Layer is set to `nil`.", instanceType)
 	}
@@ -649,23 +655,19 @@ func testListBucketsHandler(obj ObjectLayer, instanceType, bucketName string, ap
 
 // Wrapper for calling DeleteMultipleObjects HTTP handler tests for both Erasure multiple disks and single node setup.
 func TestAPIDeleteMultipleObjectsHandler(t *testing.T) {
-	ExecObjectLayerAPITest(ExecObjectLayerAPITestArgs{t: t, objAPITest: testAPIDeleteMultipleObjectsHandler, endpoints: []string{"DeleteMultipleObjects", "PutBucketPolicy"}})
+	ExecObjectLayerAPITest(t, testAPIDeleteMultipleObjectsHandler, []string{"DeleteMultipleObjects"})
 }
 
 func testAPIDeleteMultipleObjectsHandler(obj ObjectLayer, instanceType, bucketName string, apiRouter http.Handler,
-	credentials auth.Credentials, t *testing.T,
-) {
+	credentials auth.Credentials, t *testing.T) {
+
 	var err error
 
+	contentBytes := []byte("hello")
 	sha256sum := ""
 	var objectNames []string
 	for i := 0; i < 10; i++ {
-		contentBytes := []byte("hello")
 		objectName := "test-object-" + strconv.Itoa(i)
-		if i == 0 {
-			objectName += "/"
-			contentBytes = []byte{}
-		}
 		// uploading the object.
 		_, err = obj.PutObject(GlobalContext, bucketName, objectName, mustGetPutObjReader(t, bytes.NewReader(contentBytes), int64(len(contentBytes)), "", sha256sum), ObjectOptions{})
 		// if object upload fails stop the test.
@@ -677,36 +679,10 @@ func testAPIDeleteMultipleObjectsHandler(obj ObjectLayer, instanceType, bucketNa
 		objectNames = append(objectNames, objectName)
 	}
 
-	contentBytes := []byte("hello")
-	for _, name := range []string{"private/object", "public/object"} {
-		// Uploading the object with retention enabled
-		_, err = obj.PutObject(GlobalContext, bucketName, name, mustGetPutObjReader(t, bytes.NewReader(contentBytes), int64(len(contentBytes)), "", sha256sum), ObjectOptions{})
-		// if object upload fails stop the test.
-		if err != nil {
-			t.Fatalf("Put Object %s:  Error uploading object: <ERROR> %v", name, err)
-		}
-	}
-
-	// The following block will create a bucket policy with delete object to 'public/*'. This is
-	// to test a mixed response of a successful & failure while deleting objects in a single request
-	policyBytes := []byte(fmt.Sprintf(`{"Id": "Policy1637752602639", "Version": "2012-10-17", "Statement": [{"Sid": "Stmt1637752600730", "Action": "s3:DeleteObject", "Effect": "Allow", "Resource": "arn:aws:s3:::%s/public/*", "Principal": "*"}]}`, bucketName))
-	rec := httptest.NewRecorder()
-	req, err := newTestSignedRequestV4(http.MethodPut, getPutPolicyURL("", bucketName), int64(len(policyBytes)), bytes.NewReader(policyBytes),
-		credentials.AccessKey, credentials.SecretKey, nil)
-	if err != nil {
-		t.Fatalf("Failed to create HTTP request for PutBucketPolicyHandler: <ERROR> %v", err)
-	}
-	apiRouter.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNoContent {
-		t.Errorf("Expected the response status to be `%d`, but instead found `%d`", 200, rec.Code)
-	}
-
 	getObjectToDeleteList := func(objectNames []string) (objectList []ObjectToDelete) {
 		for _, objectName := range objectNames {
 			objectList = append(objectList, ObjectToDelete{
-				ObjectV: ObjectV{
-					ObjectName: objectName,
-				},
+				ObjectName: objectName,
 			})
 		}
 
@@ -725,21 +701,9 @@ func testAPIDeleteMultipleObjectsHandler(obj ObjectLayer, instanceType, bucketNa
 		return deleteErrorList
 	}
 
-	objects := []ObjectToDelete{}
-	objects = append(objects, ObjectToDelete{
-		ObjectV: ObjectV{
-			ObjectName: "private/object",
-		},
-	})
-	objects = append(objects, ObjectToDelete{
-		ObjectV: ObjectV{
-			ObjectName: "public/object",
-		},
-	})
 	requestList := []DeleteObjectsRequest{
 		{Quiet: false, Objects: getObjectToDeleteList(objectNames[:5])},
 		{Quiet: true, Objects: getObjectToDeleteList(objectNames[5:])},
-		{Quiet: false, Objects: objects},
 	}
 
 	// generate multi objects delete response.
@@ -747,13 +711,8 @@ func testAPIDeleteMultipleObjectsHandler(obj ObjectLayer, instanceType, bucketNa
 
 	deletedObjects := make([]DeletedObject, len(requestList[0].Objects))
 	for i := range requestList[0].Objects {
-		var vid string
-		if isDirObject(requestList[0].Objects[i].ObjectName) {
-			vid = ""
-		}
 		deletedObjects[i] = DeletedObject{
 			ObjectName: requestList[0].Objects[i].ObjectName,
-			VersionID:  vid,
 		}
 	}
 
@@ -763,14 +722,9 @@ func testAPIDeleteMultipleObjectsHandler(obj ObjectLayer, instanceType, bucketNa
 	successRequest1 := encodeResponse(requestList[1])
 
 	deletedObjects = make([]DeletedObject, len(requestList[1].Objects))
-	for i := range requestList[1].Objects {
-		var vid string
-		if isDirObject(requestList[0].Objects[i].ObjectName) {
-			vid = ""
-		}
+	for i := range requestList[0].Objects {
 		deletedObjects[i] = DeletedObject{
 			ObjectName: requestList[1].Objects[i].ObjectName,
-			VersionID:  vid,
 		}
 	}
 
@@ -786,20 +740,6 @@ func testAPIDeleteMultipleObjectsHandler(obj ObjectLayer, instanceType, bucketNa
 	anonResponse := generateMultiDeleteResponse(requestList[0].Quiet, nil, getDeleteErrorList(requestList[0].Objects))
 	encodedAnonResponse := encodeResponse(anonResponse)
 
-	anonRequestWithPartialPublicAccess := encodeResponse(requestList[2])
-	anonResponseWithPartialPublicAccess := generateMultiDeleteResponse(requestList[2].Quiet,
-		[]DeletedObject{
-			{ObjectName: "public/object"},
-		},
-		[]DeleteError{
-			{
-				Code:    errorCodes[ErrAccessDenied].Code,
-				Message: errorCodes[ErrAccessDenied].Description,
-				Key:     "private/object",
-			},
-		})
-	encodedAnonResponseWithPartialPublicAccess := encodeResponse(anonResponseWithPartialPublicAccess)
-
 	testCases := []struct {
 		bucket             string
 		objects            []byte
@@ -808,9 +748,9 @@ func testAPIDeleteMultipleObjectsHandler(obj ObjectLayer, instanceType, bucketNa
 		expectedContent    []byte
 		expectedRespStatus int
 	}{
-		// Test case - 0.
+		// Test case - 1.
 		// Delete objects with invalid access key.
-		0: {
+		{
 			bucket:             bucketName,
 			objects:            successRequest0,
 			accessKey:          "Invalid-AccessID",
@@ -818,19 +758,9 @@ func testAPIDeleteMultipleObjectsHandler(obj ObjectLayer, instanceType, bucketNa
 			expectedContent:    nil,
 			expectedRespStatus: http.StatusForbidden,
 		},
-		// Test case - 1.
-		// Delete valid objects with quiet flag off.
-		1: {
-			bucket:             bucketName,
-			objects:            successRequest0,
-			accessKey:          credentials.AccessKey,
-			secretKey:          credentials.SecretKey,
-			expectedContent:    encodedSuccessResponse0,
-			expectedRespStatus: http.StatusOK,
-		},
 		// Test case - 2.
-		// Delete deleted objects with quiet flag off.
-		2: {
+		// Delete valid objects with quiet flag off.
+		{
 			bucket:             bucketName,
 			objects:            successRequest0,
 			accessKey:          credentials.AccessKey,
@@ -840,7 +770,7 @@ func testAPIDeleteMultipleObjectsHandler(obj ObjectLayer, instanceType, bucketNa
 		},
 		// Test case - 3.
 		// Delete valid objects with quiet flag on.
-		3: {
+		{
 			bucket:             bucketName,
 			objects:            successRequest1,
 			accessKey:          credentials.AccessKey,
@@ -850,7 +780,7 @@ func testAPIDeleteMultipleObjectsHandler(obj ObjectLayer, instanceType, bucketNa
 		},
 		// Test case - 4.
 		// Delete previously deleted objects.
-		4: {
+		{
 			bucket:             bucketName,
 			objects:            successRequest1,
 			accessKey:          credentials.AccessKey,
@@ -861,33 +791,13 @@ func testAPIDeleteMultipleObjectsHandler(obj ObjectLayer, instanceType, bucketNa
 		// Test case - 5.
 		// Anonymous user access denied response
 		// Currently anonymous users cannot delete multiple objects in MinIO server
-		5: {
+		{
 			bucket:             bucketName,
 			objects:            anonRequest,
 			accessKey:          "",
 			secretKey:          "",
 			expectedContent:    encodedAnonResponse,
 			expectedRespStatus: http.StatusOK,
-		},
-		// Test case - 6.
-		// Anonymous user has access to some public folder, issue removing with
-		// another private object as well
-		6: {
-			bucket:             bucketName,
-			objects:            anonRequestWithPartialPublicAccess,
-			accessKey:          "",
-			secretKey:          "",
-			expectedContent:    encodedAnonResponseWithPartialPublicAccess,
-			expectedRespStatus: http.StatusOK,
-		},
-		// Test case - 7.
-		// Bucket does not exist.
-		7: {
-			bucket:             "unknown-bucket-name",
-			objects:            successRequest0,
-			accessKey:          credentials.AccessKey,
-			secretKey:          credentials.SecretKey,
-			expectedRespStatus: http.StatusNotFound,
 		},
 	}
 
@@ -897,12 +807,13 @@ func testAPIDeleteMultipleObjectsHandler(obj ObjectLayer, instanceType, bucketNa
 
 		// Generate a signed or anonymous request based on the testCase
 		if testCase.accessKey != "" {
-			req, err = newTestSignedRequestV4(http.MethodPost, getDeleteMultipleObjectsURL("", testCase.bucket),
+			req, err = newTestSignedRequestV4(http.MethodPost, getDeleteMultipleObjectsURL("", bucketName),
 				int64(len(testCase.objects)), bytes.NewReader(testCase.objects), testCase.accessKey, testCase.secretKey, nil)
 		} else {
-			req, err = newTestRequest(http.MethodPost, getDeleteMultipleObjectsURL("", testCase.bucket),
+			req, err = newTestRequest(http.MethodPost, getDeleteMultipleObjectsURL("", bucketName),
 				int64(len(testCase.objects)), bytes.NewReader(testCase.objects))
 		}
+
 		if err != nil {
 			t.Fatalf("Failed to create HTTP request for DeleteMultipleObjects: <ERROR> %v", err)
 		}
@@ -914,19 +825,19 @@ func testAPIDeleteMultipleObjectsHandler(obj ObjectLayer, instanceType, bucketNa
 		apiRouter.ServeHTTP(rec, req)
 		// Assert the response code with the expected status.
 		if rec.Code != testCase.expectedRespStatus {
-			t.Errorf("Test %d: MinIO %s: Expected the response status to be `%d`, but instead found `%d`", i, instanceType, testCase.expectedRespStatus, rec.Code)
+			t.Errorf("Test %d: MinIO %s: Expected the response status to be `%d`, but instead found `%d`", i+1, instanceType, testCase.expectedRespStatus, rec.Code)
 		}
 
 		// read the response body.
-		actualContent, err = io.ReadAll(rec.Body)
+		actualContent, err = ioutil.ReadAll(rec.Body)
 		if err != nil {
-			t.Fatalf("Test %d : MinIO %s: Failed parsing response body: <ERROR> %v", i, instanceType, err)
+			t.Fatalf("Test %d : MinIO %s: Failed parsing response body: <ERROR> %v", i+1, instanceType, err)
 		}
 
 		// Verify whether the bucket obtained object is same as the one created.
 		if testCase.expectedContent != nil && !bytes.Equal(testCase.expectedContent, actualContent) {
 			t.Log(string(testCase.expectedContent), string(actualContent))
-			t.Errorf("Test %d : MinIO %s: Object content differs from expected value.", i, instanceType)
+			t.Errorf("Test %d : MinIO %s: Object content differs from expected value.", i+1, instanceType)
 		}
 	}
 

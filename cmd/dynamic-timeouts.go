@@ -1,19 +1,18 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2017 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
@@ -33,60 +32,43 @@ const (
 )
 
 // timeouts that are dynamically adapted based on actual usage results
-type dynamicTimeout struct {
-	timeout       int64
-	minimum       int64
-	entries       int64
-	log           [dynamicTimeoutLogSize]time.Duration
-	mutex         sync.Mutex
-	retryInterval time.Duration
+type DynamicTimeout struct {
+	timeout int64
+	minimum int64
+	entries int64
+	log     [dynamicTimeoutLogSize]time.Duration
+	mutex   sync.Mutex
 }
 
-type dynamicTimeoutOpts struct {
-	timeout       time.Duration
-	minimum       time.Duration
-	retryInterval time.Duration
-}
-
-func newDynamicTimeoutWithOpts(opts dynamicTimeoutOpts) *dynamicTimeout {
-	dt := newDynamicTimeout(opts.timeout, opts.minimum)
-	dt.retryInterval = opts.retryInterval
-	return dt
-}
-
-// newDynamicTimeout returns a new dynamic timeout initialized with timeout value
-func newDynamicTimeout(timeout, minimum time.Duration) *dynamicTimeout {
+// NewDynamicTimeout returns a new dynamic timeout initialized with timeout value
+func NewDynamicTimeout(timeout, minimum time.Duration) *DynamicTimeout {
 	if timeout <= 0 || minimum <= 0 {
-		panic("newDynamicTimeout: negative or zero timeout")
+		panic("NewDynamicTimeout: negative or zero timeout")
 	}
 	if minimum > timeout {
 		minimum = timeout
 	}
-	return &dynamicTimeout{timeout: int64(timeout), minimum: int64(minimum)}
+	return &DynamicTimeout{timeout: int64(timeout), minimum: int64(minimum)}
 }
 
 // Timeout returns the current timeout value
-func (dt *dynamicTimeout) Timeout() time.Duration {
+func (dt *DynamicTimeout) Timeout() time.Duration {
 	return time.Duration(atomic.LoadInt64(&dt.timeout))
-}
-
-func (dt *dynamicTimeout) RetryInterval() time.Duration {
-	return dt.retryInterval
 }
 
 // LogSuccess logs the duration of a successful action that
 // did not hit the timeout
-func (dt *dynamicTimeout) LogSuccess(duration time.Duration) {
+func (dt *DynamicTimeout) LogSuccess(duration time.Duration) {
 	dt.logEntry(duration)
 }
 
 // LogFailure logs an action that hit the timeout
-func (dt *dynamicTimeout) LogFailure() {
+func (dt *DynamicTimeout) LogFailure() {
 	dt.logEntry(maxDuration)
 }
 
 // logEntry stores a log entry
-func (dt *dynamicTimeout) logEntry(duration time.Duration) {
+func (dt *DynamicTimeout) logEntry(duration time.Duration) {
 	if duration < 0 {
 		return
 	}
@@ -116,13 +98,13 @@ func (dt *dynamicTimeout) logEntry(duration time.Duration) {
 
 // adjust changes the value of the dynamic timeout based on the
 // previous results
-func (dt *dynamicTimeout) adjust(entries [dynamicTimeoutLogSize]time.Duration) {
-	failures, maxDur := 0, time.Duration(0)
+func (dt *DynamicTimeout) adjust(entries [dynamicTimeoutLogSize]time.Duration) {
+	failures, max := 0, time.Duration(0)
 	for _, dur := range entries[:] {
 		if dur == maxDuration {
 			failures++
-		} else if dur > maxDur {
-			maxDur = dur
+		} else if dur > max {
+			max = dur
 		}
 	}
 
@@ -144,12 +126,12 @@ func (dt *dynamicTimeout) adjust(entries [dynamicTimeoutLogSize]time.Duration) {
 	} else if failPct < dynamicTimeoutDecreaseThresholdPct {
 		// We are hitting the timeout relatively few times,
 		// so decrease the timeout towards 25 % of maximum time spent.
-		maxDur = maxDur * 125 / 100
+		max = max * 125 / 100
 
 		timeout := atomic.LoadInt64(&dt.timeout)
-		if maxDur < time.Duration(timeout) {
+		if max < time.Duration(timeout) {
 			// Move 50% toward the max.
-			timeout = (int64(maxDur) + timeout) / 2
+			timeout = (int64(max) + timeout) / 2
 		}
 		if timeout < dt.minimum {
 			timeout = dt.minimum

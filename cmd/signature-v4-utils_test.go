@@ -1,117 +1,27 @@
-// Copyright (c) 2015-2023 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2015, 2016, 2017 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
 import (
-	"context"
 	"net/http"
-	"os"
 	"testing"
-	"time"
 
-	"github.com/minio/madmin-go/v3"
-	"github.com/minio/minio/internal/auth"
-	xhttp "github.com/minio/minio/internal/http"
+	xhttp "github.com/minio/minio/cmd/http"
 )
-
-func TestCheckValid(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	objLayer, fsDir, err := prepareFS(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(fsDir)
-	if err = newTestConfig(globalMinioDefaultRegion, objLayer); err != nil {
-		t.Fatalf("unable initialize config file, %s", err)
-	}
-
-	initAllSubsystems(ctx)
-	initConfigSubsystem(ctx, objLayer)
-
-	globalIAMSys.Init(ctx, objLayer, globalEtcdClient, 2*time.Second)
-
-	req, err := newTestRequest(http.MethodGet, "http://example.com:9000/bucket/object", 0, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if err = signRequestV4(req, globalActiveCred.AccessKey, globalActiveCred.SecretKey); err != nil {
-		t.Fatal(err)
-	}
-
-	_, owner, s3Err := checkKeyValid(req, globalActiveCred.AccessKey)
-	if s3Err != ErrNone {
-		t.Fatalf("Unexpected failure with %v", errorCodes.ToAPIErr(s3Err))
-	}
-
-	if !owner {
-		t.Fatalf("Expected owner to be 'true', found %t", owner)
-	}
-
-	_, _, s3Err = checkKeyValid(req, "does-not-exist")
-	if s3Err != ErrInvalidAccessKeyID {
-		t.Fatalf("Expected error 'ErrInvalidAccessKeyID', found %v", s3Err)
-	}
-
-	ucreds, err := auth.CreateCredentials("myuser1", "mypassword1")
-	if err != nil {
-		t.Fatalf("unable create credential, %s", err)
-	}
-
-	_, err = globalIAMSys.CreateUser(ctx, ucreds.AccessKey, madmin.AddOrUpdateUserReq{
-		SecretKey: ucreds.SecretKey,
-		Status:    madmin.AccountEnabled,
-	})
-	if err != nil {
-		t.Fatalf("unable create credential, %s", err)
-	}
-
-	_, owner, s3Err = checkKeyValid(req, ucreds.AccessKey)
-	if s3Err != ErrNone {
-		t.Fatalf("Unexpected failure with %v", errorCodes.ToAPIErr(s3Err))
-	}
-
-	if owner {
-		t.Fatalf("Expected owner to be 'false', found %t", owner)
-	}
-
-	_, err = globalIAMSys.PolicyDBSet(ctx, ucreds.AccessKey, "consoleAdmin", regUser, false)
-	if err != nil {
-		t.Fatalf("unable to attach policy to credential, %s", err)
-	}
-
-	time.Sleep(4 * time.Second)
-
-	policies, err := globalIAMSys.PolicyDBGet(ucreds.AccessKey)
-	if err != nil {
-		t.Fatalf("unable to get policy to credential, %s", err)
-	}
-
-	if len(policies) == 0 {
-		t.Fatal("no policies found")
-	}
-
-	if policies[0] != "consoleAdmin" {
-		t.Fatalf("expected 'consoleAdmin', %s", policies[0])
-	}
-}
 
 // TestSkipContentSha256Cksum - Test validate the logic which decides whether
 // to skip checksum validation based on the request header.
@@ -173,10 +83,11 @@ func TestSkipContentSha256Cksum(t *testing.T) {
 				q.Add(testCase.inputHeaderKey, testCase.inputHeaderValue)
 			}
 			inputReq.URL.RawQuery = q.Encode()
-		} else if testCase.inputHeaderKey != "" {
-			inputReq.Header.Set(testCase.inputHeaderKey, testCase.inputHeaderValue)
+		} else {
+			if testCase.inputHeaderKey != "" {
+				inputReq.Header.Set(testCase.inputHeaderKey, testCase.inputHeaderValue)
+			}
 		}
-		inputReq.ParseForm()
 
 		actualResult := skipContentSha256Cksum(inputReq)
 		if testCase.expectedResult != actualResult {
@@ -193,6 +104,7 @@ func TestIsValidRegion(t *testing.T) {
 
 		expectedResult bool
 	}{
+
 		{"", "", true},
 		{globalMinioDefaultRegion, "", true},
 		{globalMinioDefaultRegion, "US", true},
@@ -250,7 +162,6 @@ func TestExtractSignedHeaders(t *testing.T) {
 	// set headers value through Get parameter
 	inputQuery.Add("x-amz-server-side-encryption", xhttp.AmzEncryptionAES)
 	r.URL.RawQuery = inputQuery.Encode()
-	r.ParseForm()
 	_, errCode = extractSignedHeaders(signedHeaders, r)
 	if errCode != ErrNone {
 		t.Fatalf("Expected the APIErrorCode to be %d, but got %d", ErrNone, errCode)
@@ -355,66 +266,9 @@ func TestGetContentSha256Cksum(t *testing.T) {
 		if testCase.h != "" {
 			r.Header.Set("x-amz-content-sha256", testCase.h)
 		}
-		r.ParseForm()
 		got := getContentSha256Cksum(r, serviceS3)
 		if got != testCase.expected {
 			t.Errorf("Test %d: got:%s expected:%s", i+1, got, testCase.expected)
 		}
-	}
-}
-
-// Test TestCheckMetaHeaders tests the logic of checkMetaHeaders() function
-func TestCheckMetaHeaders(t *testing.T) {
-	signedHeadersMap := map[string][]string{
-		"X-Amz-Meta-Test":      {"test"},
-		"X-Amz-Meta-Extension": {"png"},
-		"X-Amz-Meta-Name":      {"imagepng"},
-	}
-	expectedMetaTest := "test"
-	expectedMetaExtension := "png"
-	expectedMetaName := "imagepng"
-	r, err := http.NewRequest(http.MethodPut, "http://play.min.io:9000", nil)
-	if err != nil {
-		t.Fatal("Unable to create http.Request :", err)
-	}
-
-	// Creating input http header.
-	inputHeader := r.Header
-	inputHeader.Set("X-Amz-Meta-Test", expectedMetaTest)
-	inputHeader.Set("X-Amz-Meta-Extension", expectedMetaExtension)
-	inputHeader.Set("X-Amz-Meta-Name", expectedMetaName)
-	// calling the function being tested.
-	errCode := checkMetaHeaders(signedHeadersMap, r)
-	if errCode != ErrNone {
-		t.Fatalf("Expected the APIErrorCode to be %d, but got %d", ErrNone, errCode)
-	}
-
-	// Add new metadata in inputHeader
-	inputHeader.Set("X-Amz-Meta-Clone", "fail")
-	// calling the function being tested.
-	errCode = checkMetaHeaders(signedHeadersMap, r)
-	if errCode != ErrUnsignedHeaders {
-		t.Fatalf("Expected the APIErrorCode to be %d, but got %d", ErrUnsignedHeaders, errCode)
-	}
-
-	// Delete extra metadata from header to don't affect other test
-	inputHeader.Del("X-Amz-Meta-Clone")
-	// calling the function being tested.
-	errCode = checkMetaHeaders(signedHeadersMap, r)
-	if errCode != ErrNone {
-		t.Fatalf("Expected the APIErrorCode to be %d, but got %d", ErrNone, errCode)
-	}
-
-	// Creating input url values
-	r, err = http.NewRequest(http.MethodPut, "http://play.min.io:9000?x-amz-meta-test=test&x-amz-meta-extension=png&x-amz-meta-name=imagepng", nil)
-	if err != nil {
-		t.Fatal("Unable to create http.Request :", err)
-	}
-
-	r.ParseForm()
-	// calling the function being tested.
-	errCode = checkMetaHeaders(signedHeadersMap, r)
-	if errCode != ErrNone {
-		t.Fatalf("Expected the APIErrorCode to be %d, but got %d", ErrNone, errCode)
 	}
 }

@@ -1,19 +1,18 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2018 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
@@ -22,28 +21,42 @@ import (
 	"encoding/xml"
 	"net/http"
 
-	xhttp "github.com/minio/minio/internal/http"
-	"github.com/minio/minio/internal/logger"
+	xhttp "github.com/minio/minio/cmd/http"
+	"github.com/minio/minio/cmd/logger"
 )
 
-// writeSTSErrorResponse writes error headers
-func writeSTSErrorResponse(ctx context.Context, w http.ResponseWriter, errCode STSErrorCode, err error) {
-	stsErr := stsErrCodes.ToSTSErr(errCode)
-
+// writeSTSErrorRespone writes error headers
+func writeSTSErrorResponse(ctx context.Context, w http.ResponseWriter, isErrCodeSTS bool, errCode STSErrorCode, errCtxt error) {
+	var err STSError
+	if isErrCodeSTS {
+		err = stsErrCodes.ToSTSErr(errCode)
+	}
+	if err.Code == "InternalError" || !isErrCodeSTS {
+		aerr := getAPIError(APIErrorCode(errCode))
+		if aerr.Code != "InternalError" {
+			err.Code = aerr.Code
+			err.Description = aerr.Description
+			err.HTTPStatusCode = aerr.HTTPStatusCode
+		}
+	}
 	// Generate error response.
 	stsErrorResponse := STSErrorResponse{}
-	stsErrorResponse.Error.Code = stsErr.Code
+	stsErrorResponse.Error.Code = err.Code
 	stsErrorResponse.RequestID = w.Header().Get(xhttp.AmzRequestID)
-	stsErrorResponse.Error.Message = stsErr.Description
-	if err != nil {
-		stsErrorResponse.Error.Message = err.Error()
+	stsErrorResponse.Error.Message = err.Description
+	if errCtxt != nil {
+		stsErrorResponse.Error.Message = errCtxt.Error()
 	}
+	var logKind logger.Kind
 	switch errCode {
-	case ErrSTSInternalError, ErrSTSUpstreamError:
-		stsLogIf(ctx, err, logger.ErrorKind)
+	case ErrSTSInternalError, ErrSTSNotInitialized:
+		logKind = logger.Minio
+	default:
+		logKind = logger.All
 	}
+	logger.LogIf(ctx, errCtxt, logKind)
 	encodedErrorResponse := encodeResponse(stsErrorResponse)
-	writeResponse(w, stsErr.HTTPStatusCode, encodedErrorResponse, mimeXML)
+	writeResponse(w, err.HTTPStatusCode, encodedErrorResponse, mimeXML)
 }
 
 // STSError structure
@@ -79,11 +92,7 @@ const (
 	ErrSTSClientGrantsExpiredToken
 	ErrSTSInvalidClientGrantsToken
 	ErrSTSMalformedPolicyDocument
-	ErrSTSInsecureConnection
-	ErrSTSInvalidClientCertificate
 	ErrSTSNotInitialized
-	ErrSTSIAMNotInitialized
-	ErrSTSUpstreamError
 	ErrSTSInternalError
 )
 
@@ -135,30 +144,10 @@ var stsErrCodes = stsErrorCodeMap{
 		Description:    "The request was rejected because the policy document was malformed.",
 		HTTPStatusCode: http.StatusBadRequest,
 	},
-	ErrSTSInsecureConnection: {
-		Code:           "InsecureConnection",
-		Description:    "The request was made over a plain HTTP connection. A TLS connection is required.",
-		HTTPStatusCode: http.StatusBadRequest,
-	},
-	ErrSTSInvalidClientCertificate: {
-		Code:           "InvalidClientCertificate",
-		Description:    "The provided client certificate is invalid. Retry with a different certificate.",
-		HTTPStatusCode: http.StatusBadRequest,
-	},
 	ErrSTSNotInitialized: {
 		Code:           "STSNotInitialized",
 		Description:    "STS API not initialized, please try again.",
 		HTTPStatusCode: http.StatusServiceUnavailable,
-	},
-	ErrSTSIAMNotInitialized: {
-		Code:           "STSIAMNotInitialized",
-		Description:    "STS IAM not initialized, please try again.",
-		HTTPStatusCode: http.StatusServiceUnavailable,
-	},
-	ErrSTSUpstreamError: {
-		Code:           "InternalError",
-		Description:    "An upstream service required for this operation failed - please try again or contact an administrator.",
-		HTTPStatusCode: http.StatusInternalServerError,
 	},
 	ErrSTSInternalError: {
 		Code:           "InternalError",

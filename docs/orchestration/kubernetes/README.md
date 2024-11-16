@@ -8,7 +8,7 @@ There are multiple options to deploy MinIO on Kubernetes:
 
 - MinIO-Operator: Operator offers seamless way to create and update highly available distributed MinIO clusters. Refer [MinIO Operator documentation](https://github.com/minio/minio-operator/blob/master/README.md) for more details.
 
-- Helm Chart: MinIO Helm Chart offers customizable and easy MinIO deployment with a single command. Refer [MinIO Helm Chart documentation](https://github.com/minio/minio/tree/master/helm/minio) for more details.
+- Helm Chart: MinIO Helm Chart offers customizable and easy MinIO deployment with a single command. Refer [MinIO Helm Chart documentation](https://github.com/minio/charts) for more details.
 
 ## Monitoring MinIO in Kubernetes
 
@@ -16,6 +16,6 @@ MinIO server exposes un-authenticated liveness endpoints so Kubernetes can nativ
 
 ## Explore Further
 
-- [MinIO Erasure Code QuickStart Guide](https://min.io/docs/minio/linux/operations/concepts/erasure-coding.html)
+- [MinIO Erasure Code QuickStart Guide](https://docs.min.io/docs/minio-erasure-code-quickstart-guide)
 - [Kubernetes Documentation](https://kubernetes.io/docs/home/)
 - [Helm package manager for kubernetes](https://helm.sh/)

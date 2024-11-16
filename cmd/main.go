@@ -1,41 +1,30 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2015-2019 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
 import (
-	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-	"runtime"
-	"runtime/debug"
 	"sort"
-	"strconv"
-	"strings"
-	"time"
 
 	"github.com/minio/cli"
-	"github.com/minio/minio/internal/color"
-	"github.com/minio/minio/internal/logger"
-	"github.com/minio/pkg/v3/console"
-	"github.com/minio/pkg/v3/env"
-	"github.com/minio/pkg/v3/trie"
-	"github.com/minio/pkg/v3/words"
+	"github.com/minio/minio/pkg/console"
+	"github.com/minio/minio/pkg/trie"
+	"github.com/minio/minio/pkg/words"
 )
 
 // GlobalFlags - global flags for minio.
@@ -54,7 +43,7 @@ var GlobalFlags = []cli.Flag{
 	},
 	cli.BoolFlag{
 		Name:  "quiet",
-		Usage: "disable startup and info messages",
+		Usage: "disable startup information",
 	},
 	cli.BoolFlag{
 		Name:  "anonymous",
@@ -62,7 +51,7 @@ var GlobalFlags = []cli.Flag{
 	},
 	cli.BoolFlag{
 		Name:  "json",
-		Usage: "output logs in JSON format",
+		Usage: "output server logs and startup information in json format",
 	},
 	// Deprecated flag, so its hidden now, existing deployments will keep working.
 	cli.BoolFlag{
@@ -107,11 +96,6 @@ func newApp(name string) *cli.App {
 
 	// registerCommand registers a cli command.
 	registerCommand := func(command cli.Command) {
-		// avoid registering commands which are not being built (via
-		// go:build tags)
-		if command.Name == "" {
-			return
-		}
 		commands = append(commands, command)
 		commandsTree.Insert(command.Name)
 	}
@@ -139,14 +123,13 @@ func newApp(name string) *cli.App {
 
 	// Register all commands.
 	registerCommand(serverCmd)
-	registerCommand(fmtGenCmd)
+	registerCommand(gatewayCmd)
 
 	// Set up app.
 	cli.HelpFlag = cli.BoolFlag{
 		Name:  "help, h",
 		Usage: "show help",
 	}
-	cli.VersionPrinter = printMinIOVersion
 
 	app := cli.NewApp()
 	app.Name = name
@@ -175,54 +158,13 @@ func newApp(name string) *cli.App {
 	return app
 }
 
-func startupBanner(banner io.Writer) {
-	CopyrightYear = strconv.Itoa(time.Now().Year())
-	fmt.Fprintln(banner, color.Blue("Copyright:")+color.Bold(" 2015-%s MinIO, Inc.", CopyrightYear))
-	fmt.Fprintln(banner, color.Blue("License:")+color.Bold(" "+MinioLicense))
-	fmt.Fprintln(banner, color.Blue("Version:")+color.Bold(" %s (%s %s/%s)", ReleaseTag, runtime.Version(), runtime.GOOS, runtime.GOARCH))
-}
-
-func versionBanner(c *cli.Context) io.Reader {
-	banner := &strings.Builder{}
-	fmt.Fprintln(banner, color.Bold("%s version %s (commit-id=%s)", c.App.Name, c.App.Version, CommitID))
-	fmt.Fprintln(banner, color.Blue("Runtime:")+color.Bold(" %s %s/%s", runtime.Version(), runtime.GOOS, runtime.GOARCH))
-	fmt.Fprintln(banner, color.Blue("License:")+color.Bold(" GNU AGPLv3 - https://www.gnu.org/licenses/agpl-3.0.html"))
-	fmt.Fprintln(banner, color.Blue("Copyright:")+color.Bold(" 2015-%s MinIO, Inc.", CopyrightYear))
-	return strings.NewReader(banner.String())
-}
-
-func printMinIOVersion(c *cli.Context) {
-	io.Copy(c.App.Writer, versionBanner(c))
-}
-
-var debugNoExit = env.Get("_MINIO_DEBUG_NO_EXIT", "") != ""
-
 // Main main for minio server.
 func Main(args []string) {
 	// Set the minio app name.
 	appName := filepath.Base(args[0])
 
-	if debugNoExit {
-		freeze := func(_ int) {
-			// Infinite blocking op
-			<-make(chan struct{})
-		}
-
-		// Override the logger os.Exit()
-		logger.ExitFunc = freeze
-
-		defer func() {
-			if err := recover(); err != nil {
-				fmt.Println("panic:", err)
-				fmt.Println("")
-				fmt.Println(string(debug.Stack()))
-			}
-			freeze(-1)
-		}()
-	}
-
 	// Run the app - exit on error.
 	if err := newApp(appName).Run(args); err != nil {
-		os.Exit(1) //nolint:gocritic
+		os.Exit(1)
 	}
 }

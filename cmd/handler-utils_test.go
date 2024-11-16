@@ -1,19 +1,18 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2015, 2016, 2017 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
@@ -21,22 +20,20 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
-	"io"
+	"io/ioutil"
 	"net/http"
 	"net/textproto"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 
-	"github.com/minio/minio/internal/config"
+	"github.com/minio/minio/cmd/config"
 )
 
 // Tests validate bucket LocationConstraint.
-func TestIsValidLocationConstraint(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	obj, fsDir, err := prepareFS(ctx)
+func TestIsValidLocationContraint(t *testing.T) {
+	obj, fsDir, err := prepareFS()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,13 +44,13 @@ func TestIsValidLocationConstraint(t *testing.T) {
 
 	// Corrupted XML
 	malformedReq := &http.Request{
-		Body:          io.NopCloser(bytes.NewReader([]byte("<>"))),
+		Body:          ioutil.NopCloser(bytes.NewReader([]byte("<>"))),
 		ContentLength: int64(len("<>")),
 	}
 
 	// Not an XML
 	badRequest := &http.Request{
-		Body:          io.NopCloser(bytes.NewReader([]byte("garbage"))),
+		Body:          ioutil.NopCloser(bytes.NewReader([]byte("garbage"))),
 		ContentLength: int64(len("garbage")),
 	}
 
@@ -63,7 +60,7 @@ func TestIsValidLocationConstraint(t *testing.T) {
 		createBucketConfig.Location = location
 		createBucketConfigBytes, _ := xml.Marshal(createBucketConfig)
 		createBucketConfigBuffer := bytes.NewReader(createBucketConfigBytes)
-		req.Body = io.NopCloser(createBucketConfigBuffer)
+		req.Body = ioutil.NopCloser(createBucketConfigBuffer)
 		req.ContentLength = int64(createBucketConfigBuffer.Len())
 		return req
 	}
@@ -91,6 +88,44 @@ func TestIsValidLocationConstraint(t *testing.T) {
 		_, actualCode := parseLocationConstraint(testCase.request)
 		if testCase.expectedCode != actualCode {
 			t.Errorf("Test %d: Expected the APIErrCode to be %d, but instead found %d", i+1, testCase.expectedCode, actualCode)
+		}
+	}
+}
+
+// Test validate form field size.
+func TestValidateFormFieldSize(t *testing.T) {
+	testCases := []struct {
+		header http.Header
+		err    error
+	}{
+		// Empty header returns error as nil,
+		{
+			header: nil,
+			err:    nil,
+		},
+		// Valid header returns error as nil.
+		{
+			header: http.Header{
+				"Content-Type": []string{"image/png"},
+			},
+			err: nil,
+		},
+		// Invalid header value > maxFormFieldSize+1
+		{
+			header: http.Header{
+				"Garbage": []string{strings.Repeat("a", int(maxFormFieldSize)+1)},
+			},
+			err: errSizeUnexpected,
+		},
+	}
+
+	// Run validate form field size check under all test cases.
+	for i, testCase := range testCases {
+		err := validateFormFieldSize(context.Background(), testCase.header)
+		if err != nil {
+			if err.Error() != testCase.err.Error() {
+				t.Errorf("Test %d: Expected error %s, got %s", i+1, testCase.err, err)
+			}
 		}
 	}
 }
@@ -185,9 +220,6 @@ func TestGetResource(t *testing.T) {
 		expectedResource string
 	}{
 		{"/a/b/c", "test.mydomain.com", []string{"mydomain.com"}, "/test/a/b/c"},
-		{"/a/b/c", "[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:17000", []string{"mydomain.com"}, "/a/b/c"},
-		{"/a/b/c", "[2001:0db8:85a3:0000:0000:8a2e:0370:7334]", []string{"mydomain.com"}, "/a/b/c"},
-		{"/a/b/c", "192.168.1.1:9000", []string{"mydomain.com"}, "/a/b/c"},
 		{"/a/b/c", "test.mydomain.com", []string{"notmydomain.com"}, "/a/b/c"},
 		{"/a/b/c", "test.mydomain.com", nil, "/a/b/c"},
 	}

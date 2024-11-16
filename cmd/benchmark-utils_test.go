@@ -1,19 +1,18 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2016, 2017 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
@@ -25,7 +24,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/dustin/go-humanize"
+	humanize "github.com/dustin/go-humanize"
 )
 
 // Benchmark utility functions for ObjectLayer.PutObject().
@@ -35,7 +34,7 @@ func runPutObjectBenchmark(b *testing.B, obj ObjectLayer, objSize int) {
 	// obtains random bucket name.
 	bucket := getRandomBucketName()
 	// create bucket.
-	err = obj.MakeBucket(context.Background(), bucket, MakeBucketOptions{})
+	err = obj.MakeBucketWithLocation(context.Background(), bucket, BucketOptions{})
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -76,7 +75,7 @@ func runPutObjectPartBenchmark(b *testing.B, obj ObjectLayer, partSize int) {
 	object := getRandomObjectName()
 
 	// create bucket.
-	err = obj.MakeBucket(context.Background(), bucket, MakeBucketOptions{})
+	err = obj.MakeBucketWithLocation(context.Background(), bucket, BucketOptions{})
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -85,12 +84,12 @@ func runPutObjectPartBenchmark(b *testing.B, obj ObjectLayer, partSize int) {
 
 	// PutObjectPart returns etag of the object inserted.
 	// etag variable is assigned with that value.
-	var etag string
+	var etag, uploadID string
 	// get text data generated for number of bytes equal to object size.
 	textData := generateBytesData(objSize)
 	// generate md5sum for the generated data.
 	// md5sum of the data to written is required as input for NewMultipartUpload.
-	res, err := obj.NewMultipartUpload(context.Background(), bucket, object, ObjectOptions{})
+	uploadID, err = obj.NewMultipartUpload(context.Background(), bucket, object, ObjectOptions{})
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -111,9 +110,9 @@ func runPutObjectPartBenchmark(b *testing.B, obj ObjectLayer, partSize int) {
 			} else {
 				textPartData = textData[j*partSize:]
 			}
-			md5hex := getMD5Hash(textPartData)
+			md5hex := getMD5Hash([]byte(textPartData))
 			var partInfo PartInfo
-			partInfo, err = obj.PutObjectPart(context.Background(), bucket, object, res.UploadID, j,
+			partInfo, err = obj.PutObjectPart(context.Background(), bucket, object, uploadID, j,
 				mustGetPutObjReader(b, bytes.NewReader(textPartData), int64(len(textPartData)), md5hex, sha256hex), ObjectOptions{})
 			if err != nil {
 				b.Fatal(err)
@@ -196,7 +195,7 @@ func runPutObjectBenchmarkParallel(b *testing.B, obj ObjectLayer, objSize int) {
 	// obtains random bucket name.
 	bucket := getRandomBucketName()
 	// create bucket.
-	err := obj.MakeBucket(context.Background(), bucket, MakeBucketOptions{})
+	err := obj.MakeBucketWithLocation(context.Background(), bucket, BucketOptions{})
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -206,7 +205,7 @@ func runPutObjectBenchmarkParallel(b *testing.B, obj ObjectLayer, objSize int) {
 	// generate md5sum for the generated data.
 	// md5sum of the data to written is required as input for PutObject.
 
-	md5hex := getMD5Hash(textData)
+	md5hex := getMD5Hash([]byte(textData))
 	sha256hex := ""
 
 	// benchmark utility which helps obtain number of allocations and bytes allocated per ops.

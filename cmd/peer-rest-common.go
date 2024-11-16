@@ -1,84 +1,87 @@
-// Copyright (c) 2015-2024 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2019 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
-import "time"
-
 const (
-	peerRESTVersion       = "v39" // add more flags to speedtest API
+	peerRESTVersion       = "v14" // Add GetBucketStats API
 	peerRESTVersionPrefix = SlashSeparator + peerRESTVersion
 	peerRESTPrefix        = minioReservedBucketPath + "/peer"
 	peerRESTPath          = peerRESTPrefix + peerRESTVersionPrefix
 )
 
 const (
-	peerRESTMethodHealth                = "/health"
-	peerRESTMethodVerifyBinary          = "/verifybinary"
-	peerRESTMethodCommitBinary          = "/commitbinary"
-	peerRESTMethodStartProfiling        = "/startprofiling"
-	peerRESTMethodDownloadProfilingData = "/downloadprofilingdata"
-	peerRESTMethodSpeedTest             = "/speedtest"
-	peerRESTMethodDriveSpeedTest        = "/drivespeedtest"
-	peerRESTMethodDevNull               = "/devnull"
-	peerRESTMethodNetperf               = "/netperf"
-	peerRESTMethodGetReplicationMRF     = "/getreplicationmrf"
+	peerRESTMethodHealth                 = "/health"
+	peerRESTMethodServerInfo             = "/serverinfo"
+	peerRESTMethodDriveInfo              = "/driveinfo"
+	peerRESTMethodNetInfo                = "/netinfo"
+	peerRESTMethodCPUInfo                = "/cpuinfo"
+	peerRESTMethodDiskHwInfo             = "/diskhwinfo"
+	peerRESTMethodOsInfo                 = "/osinfo"
+	peerRESTMethodMemInfo                = "/meminfo"
+	peerRESTMethodProcInfo               = "/procinfo"
+	peerRESTMethodDispatchNetInfo        = "/dispatchnetinfo"
+	peerRESTMethodDeleteBucketMetadata   = "/deletebucketmetadata"
+	peerRESTMethodLoadBucketMetadata     = "/loadbucketmetadata"
+	peerRESTMethodGetBucketStats         = "/getbucketstats"
+	peerRESTMethodServerUpdate           = "/serverupdate"
+	peerRESTMethodSignalService          = "/signalservice"
+	peerRESTMethodBackgroundHealStatus   = "/backgroundhealstatus"
+	peerRESTMethodGetLocks               = "/getlocks"
+	peerRESTMethodLoadUser               = "/loaduser"
+	peerRESTMethodLoadServiceAccount     = "/loadserviceaccount"
+	peerRESTMethodDeleteUser             = "/deleteuser"
+	peerRESTMethodDeleteServiceAccount   = "/deleteserviceaccount"
+	peerRESTMethodLoadPolicy             = "/loadpolicy"
+	peerRESTMethodLoadPolicyMapping      = "/loadpolicymapping"
+	peerRESTMethodDeletePolicy           = "/deletepolicy"
+	peerRESTMethodLoadGroup              = "/loadgroup"
+	peerRESTMethodStartProfiling         = "/startprofiling"
+	peerRESTMethodDownloadProfilingData  = "/downloadprofilingdata"
+	peerRESTMethodCycleBloom             = "/cyclebloom"
+	peerRESTMethodTrace                  = "/trace"
+	peerRESTMethodListen                 = "/listen"
+	peerRESTMethodLog                    = "/log"
+	peerRESTMethodGetLocalDiskIDs        = "/getlocaldiskids"
+	peerRESTMethodGetBandwidth           = "/bandwidth"
+	peerRESTMethodGetMetacacheListing    = "/getmetacache"
+	peerRESTMethodUpdateMetacacheListing = "/updatemetacache"
+	peerRESTMethodGetPeerMetrics         = "/peermetrics"
 )
 
 const (
-	peerRESTBucket          = "bucket"
-	peerRESTBuckets         = "buckets"
-	peerRESTUser            = "user"
-	peerRESTGroup           = "group"
-	peerRESTUserTemp        = "user-temp"
-	peerRESTPolicy          = "policy"
-	peerRESTUserOrGroup     = "user-or-group"
-	peerRESTUserType        = "user-type"
-	peerRESTIsGroup         = "is-group"
-	peerRESTSignal          = "signal"
-	peerRESTSubSys          = "sub-sys"
-	peerRESTProfiler        = "profiler"
-	peerRESTSize            = "size"
-	peerRESTConcurrent      = "concurrent"
-	peerRESTDuration        = "duration"
-	peerRESTStorageClass    = "storage-class"
-	peerRESTEnableSha256    = "enableSha256"
-	peerRESTEnableMultipart = "enableMultipart"
-	peerRESTAccessKey       = "access-key"
-	peerRESTMetricsTypes    = "types"
-	peerRESTDisk            = "disk"
-	peerRESTHost            = "host"
-	peerRESTJobID           = "job-id"
-	peerRESTDepID           = "depID"
-	peerRESTStartRebalance  = "start-rebalance"
-	peerRESTMetrics         = "metrics"
-	peerRESTDryRun          = "dry-run"
-	peerRESTUploadID        = "up-id"
-
-	peerRESTURL         = "url"
-	peerRESTSha256Sum   = "sha256sum"
-	peerRESTReleaseInfo = "releaseinfo"
-	peerRESTExecAt      = "exec-at"
+	peerRESTBucket         = "bucket"
+	peerRESTBuckets        = "buckets"
+	peerRESTUser           = "user"
+	peerRESTGroup          = "group"
+	peerRESTUserTemp       = "user-temp"
+	peerRESTPolicy         = "policy"
+	peerRESTUserOrGroup    = "user-or-group"
+	peerRESTIsGroup        = "is-group"
+	peerRESTSignal         = "signal"
+	peerRESTProfiler       = "profiler"
+	peerRESTTraceErr       = "err"
+	peerRESTTraceInternal  = "internal"
+	peerRESTTraceStorage   = "storage"
+	peerRESTTraceS3        = "s3"
+	peerRESTTraceOS        = "os"
+	peerRESTTraceThreshold = "threshold"
 
 	peerRESTListenBucket = "bucket"
 	peerRESTListenPrefix = "prefix"
 	peerRESTListenSuffix = "suffix"
 	peerRESTListenEvents = "events"
-	peerRESTLogMask      = "log-mask"
 )
-
-const restartUpdateDelay = 250 * time.Millisecond

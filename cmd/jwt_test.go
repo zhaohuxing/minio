@@ -1,46 +1,98 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2016, 2017 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
 import (
-	"context"
 	"net/http"
 	"os"
 	"testing"
 
-	jwtgo "github.com/golang-jwt/jwt/v4"
-	xjwt "github.com/minio/minio/internal/jwt"
+	xjwt "github.com/minio/minio/cmd/jwt"
+	"github.com/minio/minio/pkg/auth"
 )
 
-func getTokenString(accessKey, secretKey string) (string, error) {
-	claims := xjwt.NewMapClaims()
-	claims.SetExpiry(UTCNow().Add(defaultJWTExpiry))
-	claims.SetAccessKey(accessKey)
-	token := jwtgo.NewWithClaims(jwtgo.SigningMethodHS512, claims)
-	return token.SignedString([]byte(secretKey))
+func testAuthenticate(authType string, t *testing.T) {
+	obj, fsDir, err := prepareFS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(fsDir)
+	if err = newTestConfig(globalMinioDefaultRegion, obj); err != nil {
+		t.Fatal(err)
+	}
+
+	cred, err := auth.GetNewCredentials()
+	if err != nil {
+		t.Fatalf("Error getting new credentials: %s", err)
+	}
+
+	globalActiveCred = cred
+
+	// Define test cases.
+	testCases := []struct {
+		accessKey   string
+		secretKey   string
+		expectedErr error
+	}{
+		// Access key (less than 3 chrs) too small.
+		{"u1", cred.SecretKey, auth.ErrInvalidAccessKeyLength},
+		// Secret key (less than 8 chrs) too small.
+		{cred.AccessKey, "pass", auth.ErrInvalidSecretKeyLength},
+		// Authentication error.
+		{"myuser", "mypassword", errInvalidAccessKeyID},
+		// Authentication error.
+		{cred.AccessKey, "mypassword", errAuthentication},
+		// Success.
+		{cred.AccessKey, cred.SecretKey, nil},
+	}
+
+	// Run tests.
+	for _, testCase := range testCases {
+		var err error
+		if authType == "web" {
+			_, err = authenticateWeb(testCase.accessKey, testCase.secretKey)
+		} else if authType == "url" {
+			_, err = authenticateURL(testCase.accessKey, testCase.secretKey)
+		}
+
+		if testCase.expectedErr != nil {
+			if err == nil {
+				t.Fatalf("%+v: expected: %s, got: <nil>", testCase, testCase.expectedErr)
+			}
+			if testCase.expectedErr.Error() != err.Error() {
+				t.Fatalf("%+v: expected: %s, got: %s", testCase, testCase.expectedErr, err)
+			}
+		} else if err != nil {
+			t.Fatalf("%+v: expected: <nil>, got: %s", testCase, err)
+		}
+	}
+}
+
+func TestAuthenticateWeb(t *testing.T) {
+	testAuthenticate("web", t)
+}
+
+func TestAuthenticateURL(t *testing.T) {
+	testAuthenticate("url", t)
 }
 
 // Tests web request authenticator.
 func TestWebRequestAuthenticate(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	obj, fsDir, err := prepareFS(ctx)
+	obj, fsDir, err := prepareFS()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +138,7 @@ func TestWebRequestAuthenticate(t *testing.T) {
 	}
 
 	for i, testCase := range testCases {
-		_, _, _, gotErr := metricsRequestAuthenticate(testCase.req)
+		_, _, gotErr := webRequestAuthenticate(testCase.req)
 		if testCase.expectedErr != gotErr {
 			t.Errorf("Test %d, expected err %s, got %s", i+1, testCase.expectedErr, gotErr)
 		}
@@ -94,10 +146,7 @@ func TestWebRequestAuthenticate(t *testing.T) {
 }
 
 func BenchmarkParseJWTStandardClaims(b *testing.B) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	obj, fsDir, err := prepareFS(ctx)
+	obj, fsDir, err := prepareFS()
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -107,7 +156,7 @@ func BenchmarkParseJWTStandardClaims(b *testing.B) {
 	}
 
 	creds := globalActiveCred
-	token, err := authenticateNode(creds.AccessKey, creds.SecretKey)
+	token, err := authenticateNode(creds.AccessKey, creds.SecretKey, "")
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -125,10 +174,7 @@ func BenchmarkParseJWTStandardClaims(b *testing.B) {
 }
 
 func BenchmarkParseJWTMapClaims(b *testing.B) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	obj, fsDir, err := prepareFS(ctx)
+	obj, fsDir, err := prepareFS()
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -138,7 +184,7 @@ func BenchmarkParseJWTMapClaims(b *testing.B) {
 	}
 
 	creds := globalActiveCred
-	token, err := authenticateNode(creds.AccessKey, creds.SecretKey)
+	token, err := authenticateNode(creds.AccessKey, creds.SecretKey, "")
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -158,10 +204,7 @@ func BenchmarkParseJWTMapClaims(b *testing.B) {
 }
 
 func BenchmarkAuthenticateNode(b *testing.B) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	obj, fsDir, err := prepareFS(ctx)
+	obj, fsDir, err := prepareFS()
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -171,20 +214,27 @@ func BenchmarkAuthenticateNode(b *testing.B) {
 	}
 
 	creds := globalActiveCred
-	b.Run("uncached", func(b *testing.B) {
-		fn := authenticateNode
-		b.ResetTimer()
-		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
-			fn(creds.AccessKey, creds.SecretKey)
-		}
-	})
-	b.Run("cached", func(b *testing.B) {
-		fn := newCachedAuthToken()
-		b.ResetTimer()
-		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
-			fn()
-		}
-	})
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		authenticateNode(creds.AccessKey, creds.SecretKey, "")
+	}
+}
+
+func BenchmarkAuthenticateWeb(b *testing.B) {
+	obj, fsDir, err := prepareFS()
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer os.RemoveAll(fsDir)
+	if err = newTestConfig(globalMinioDefaultRegion, obj); err != nil {
+		b.Fatal(err)
+	}
+
+	creds := globalActiveCred
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		authenticateWeb(creds.AccessKey, creds.SecretKey)
+	}
 }

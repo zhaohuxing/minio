@@ -1,60 +1,47 @@
-// Copyright (c) 2015-2024 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2019 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
 import (
 	"context"
 	"encoding/xml"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
+	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/minio/madmin-go/v3"
+	miniogo "github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/tags"
-	"github.com/minio/minio/internal/amztime"
-	sse "github.com/minio/minio/internal/bucket/encryption"
-	"github.com/minio/minio/internal/bucket/lifecycle"
-	"github.com/minio/minio/internal/event"
-	xhttp "github.com/minio/minio/internal/http"
-	"github.com/minio/minio/internal/logger"
-	"github.com/minio/minio/internal/s3select"
-	xnet "github.com/minio/pkg/v3/net"
-	"github.com/zeebo/xxh3"
+	xhttp "github.com/minio/minio/cmd/http"
+	"github.com/minio/minio/cmd/logger"
+	sse "github.com/minio/minio/pkg/bucket/encryption"
+	"github.com/minio/minio/pkg/bucket/lifecycle"
+	"github.com/minio/minio/pkg/event"
+	"github.com/minio/minio/pkg/hash"
+	"github.com/minio/minio/pkg/madmin"
+	"github.com/minio/minio/pkg/s3select"
 )
 
 const (
 	// Disabled means the lifecycle rule is inactive
 	Disabled = "Disabled"
-	// TransitionStatus status of transition
-	TransitionStatus = "transition-status"
-	// TransitionedObjectName name of transitioned object
-	TransitionedObjectName = "transitioned-object"
-	// TransitionedVersionID is version of remote object
-	TransitionedVersionID = "transitioned-versionID"
-	// TransitionTier name of transition storage class
-	TransitionTier = "transition-tier"
 )
 
 // LifecycleSys - Bucket lifecycle subsystem.
@@ -62,8 +49,16 @@ type LifecycleSys struct{}
 
 // Get - gets lifecycle config associated to a given bucket name.
 func (sys *LifecycleSys) Get(bucketName string) (lc *lifecycle.Lifecycle, err error) {
-	lc, _, err = globalBucketMetadataSys.GetLifecycleConfig(bucketName)
-	return lc, err
+	if globalIsGateway {
+		objAPI := newObjectLayerFn()
+		if objAPI == nil {
+			return nil, errServerNotInitialized
+		}
+
+		return nil, BucketLifecycleNotFound{Bucket: bucketName}
+	}
+
+	return globalBucketMetadataSys.GetLifecycleConfig(bucketName)
 }
 
 // NewLifecycleSys - creates new lifecycle system.
@@ -71,707 +66,424 @@ func NewLifecycleSys() *LifecycleSys {
 	return &LifecycleSys{}
 }
 
-func ilmTrace(startTime time.Time, duration time.Duration, oi ObjectInfo, event string, metadata map[string]string, err string) madmin.TraceInfo {
-	sz, _ := oi.GetActualSize()
-	return madmin.TraceInfo{
-		TraceType: madmin.TraceILM,
-		Time:      startTime,
-		NodeName:  globalLocalNodeName,
-		FuncName:  event,
-		Duration:  duration,
-		Path:      pathJoin(oi.Bucket, oi.Name),
-		Bytes:     sz,
-		Error:     err,
-		Message:   getSource(4),
-		Custom:    metadata,
-	}
-}
-
-func (sys *LifecycleSys) trace(oi ObjectInfo) func(event string, metadata map[string]string, err error) {
-	startTime := time.Now()
-	return func(event string, metadata map[string]string, err error) {
-		duration := time.Since(startTime)
-		if globalTrace.NumSubscribers(madmin.TraceILM) > 0 {
-			e := ""
-			if err != nil {
-				e = err.Error()
-			}
-			globalTrace.Publish(ilmTrace(startTime, duration, oi, event, metadata, e))
-		}
-	}
-}
-
 type expiryTask struct {
-	objInfo ObjectInfo
-	event   lifecycle.Event
-	src     lcEventSrc
+	objInfo       ObjectInfo
+	versionExpiry bool
 }
 
-// expiryStats records metrics related to ILM expiry activities
-type expiryStats struct {
-	missedExpiryTasks      atomic.Int64
-	missedFreeVersTasks    atomic.Int64
-	missedTierJournalTasks atomic.Int64
-	workers                atomic.Int32
-}
-
-// MissedTasks returns the number of ILM expiry tasks that were missed since
-// there were no available workers.
-func (e *expiryStats) MissedTasks() int64 {
-	return e.missedExpiryTasks.Load()
-}
-
-// MissedFreeVersTasks returns the number of free version collection tasks that
-// were missed since there were no available workers.
-func (e *expiryStats) MissedFreeVersTasks() int64 {
-	return e.missedFreeVersTasks.Load()
-}
-
-// MissedTierJournalTasks returns the number of tasks to remove tiered objects
-// that were missed since there were no available workers.
-func (e *expiryStats) MissedTierJournalTasks() int64 {
-	return e.missedTierJournalTasks.Load()
-}
-
-// NumWorkers returns the number of active workers executing one of ILM expiry
-// tasks or free version collection tasks.
-func (e *expiryStats) NumWorkers() int32 {
-	return e.workers.Load()
-}
-
-type expiryOp interface {
-	OpHash() uint64
-}
-
-type freeVersionTask struct {
-	ObjectInfo
-}
-
-func (f freeVersionTask) OpHash() uint64 {
-	return xxh3.HashString(f.TransitionedObject.Tier + f.TransitionedObject.Name)
-}
-
-func (n newerNoncurrentTask) OpHash() uint64 {
-	return xxh3.HashString(n.bucket + n.versions[0].ObjectV.ObjectName)
-}
-
-func (j jentry) OpHash() uint64 {
-	return xxh3.HashString(j.TierName + j.ObjName)
-}
-
-func (e expiryTask) OpHash() uint64 {
-	return xxh3.HashString(e.objInfo.Bucket + e.objInfo.Name)
-}
-
-// expiryState manages all ILM related expiration activities.
 type expiryState struct {
-	mu      sync.RWMutex
-	workers atomic.Pointer[[]chan expiryOp]
-
-	ctx    context.Context
-	objAPI ObjectLayer
-
-	stats expiryStats
+	once     sync.Once
+	expiryCh chan expiryTask
 }
 
-// PendingTasks returns the number of pending ILM expiry tasks.
-func (es *expiryState) PendingTasks() int {
-	w := es.workers.Load()
-	if w == nil || len(*w) == 0 {
-		return 0
-	}
-	var tasks int
-	for _, wrkr := range *w {
-		tasks += len(wrkr)
-	}
-	return tasks
-}
-
-// enqueueTierJournalEntry enqueues a tier journal entry referring to a remote
-// object corresponding to a 'replaced' object versions. This applies only to
-// non-versioned or version suspended buckets.
-func (es *expiryState) enqueueTierJournalEntry(je jentry) {
-	wrkr := es.getWorkerCh(je.OpHash())
-	if wrkr == nil {
-		es.stats.missedTierJournalTasks.Add(1)
-		return
-	}
+func (es *expiryState) queueExpiryTask(oi ObjectInfo, rmVersion bool) {
 	select {
 	case <-GlobalContext.Done():
-	case wrkr <- je:
+		es.once.Do(func() {
+			close(es.expiryCh)
+		})
+	case es.expiryCh <- expiryTask{objInfo: oi, versionExpiry: rmVersion}:
 	default:
-		es.stats.missedTierJournalTasks.Add(1)
 	}
 }
 
-// enqueueFreeVersion enqueues a free version to be deleted
-func (es *expiryState) enqueueFreeVersion(oi ObjectInfo) {
-	task := freeVersionTask{ObjectInfo: oi}
-	wrkr := es.getWorkerCh(task.OpHash())
-	if wrkr == nil {
-		es.stats.missedFreeVersTasks.Add(1)
-		return
-	}
-	select {
-	case <-GlobalContext.Done():
-	case wrkr <- task:
-	default:
-		es.stats.missedFreeVersTasks.Add(1)
-	}
-}
+var (
+	globalExpiryState *expiryState
+)
 
-// enqueueByDays enqueues object versions expired by days for expiry.
-func (es *expiryState) enqueueByDays(oi ObjectInfo, event lifecycle.Event, src lcEventSrc) {
-	task := expiryTask{objInfo: oi, event: event, src: src}
-	wrkr := es.getWorkerCh(task.OpHash())
-	if wrkr == nil {
-		es.stats.missedExpiryTasks.Add(1)
-		return
-	}
-	select {
-	case <-GlobalContext.Done():
-	case wrkr <- task:
-	default:
-		es.stats.missedExpiryTasks.Add(1)
-	}
-}
-
-// enqueueByNewerNoncurrent enqueues object versions expired by
-// NewerNoncurrentVersions limit for expiry.
-func (es *expiryState) enqueueByNewerNoncurrent(bucket string, versions []ObjectToDelete, lcEvent lifecycle.Event) {
-	if len(versions) == 0 {
-		return
-	}
-
-	task := newerNoncurrentTask{bucket: bucket, versions: versions, event: lcEvent}
-	wrkr := es.getWorkerCh(task.OpHash())
-	if wrkr == nil {
-		es.stats.missedExpiryTasks.Add(1)
-		return
-	}
-	select {
-	case <-GlobalContext.Done():
-	case wrkr <- task:
-	default:
-		es.stats.missedExpiryTasks.Add(1)
-	}
-}
-
-// globalExpiryState is the per-node instance which manages all ILM expiry tasks.
-var globalExpiryState *expiryState
-
-// newExpiryState creates an expiryState with buffered channels allocated for
-// each ILM expiry task type.
-func newExpiryState(ctx context.Context, objAPI ObjectLayer, n int) *expiryState {
-	es := &expiryState{
-		ctx:    ctx,
-		objAPI: objAPI,
-	}
-	workers := make([]chan expiryOp, 0, n)
-	es.workers.Store(&workers)
-	es.ResizeWorkers(n)
-	return es
-}
-
-func (es *expiryState) getWorkerCh(h uint64) chan<- expiryOp {
-	w := es.workers.Load()
-	if w == nil || len(*w) == 0 {
-		return nil
-	}
-	workers := *w
-	return workers[h%uint64(len(workers))]
-}
-
-func (es *expiryState) ResizeWorkers(n int) {
-	if n == 0 {
-		n = 100
-	}
-
-	// Lock to avoid multiple resizes to happen at the same time.
-	es.mu.Lock()
-	defer es.mu.Unlock()
-	var workers []chan expiryOp
-	if v := es.workers.Load(); v != nil {
-		// Copy to new array.
-		workers = append(workers, *v...)
-	}
-
-	if n == len(workers) || n < 1 {
-		return
-	}
-
-	for len(workers) < n {
-		input := make(chan expiryOp, 10000)
-		workers = append(workers, input)
-		go es.Worker(input)
-		es.stats.workers.Add(1)
-	}
-
-	for len(workers) > n {
-		worker := workers[len(workers)-1]
-		workers = workers[:len(workers)-1]
-		worker <- expiryOp(nil)
-		es.stats.workers.Add(-1)
-	}
-	// Atomically replace workers.
-	es.workers.Store(&workers)
-}
-
-// Worker handles 4 types of expiration tasks.
-// 1. Expiry of objects, includes regular and transitioned objects
-// 2. Expiry of noncurrent versions due to NewerNoncurrentVersions
-// 3. Expiry of free-versions, for remote objects of transitioned object which have been expired since.
-// 4. Expiry of remote objects corresponding to objects in a
-// non-versioned/version suspended buckets
-func (es *expiryState) Worker(input <-chan expiryOp) {
-	for {
-		select {
-		case <-es.ctx.Done():
-			return
-		case v, ok := <-input:
-			if !ok {
-				return
-			}
-			if v == nil {
-				// ResizeWorkers signaling worker to quit
-				return
-			}
-			switch v := v.(type) {
-			case expiryTask:
-				if v.objInfo.TransitionedObject.Status != "" {
-					applyExpiryOnTransitionedObject(es.ctx, es.objAPI, v.objInfo, v.event, v.src)
-				} else {
-					applyExpiryOnNonTransitionedObjects(es.ctx, es.objAPI, v.objInfo, v.event, v.src)
-				}
-			case newerNoncurrentTask:
-				deleteObjectVersions(es.ctx, es.objAPI, v.bucket, v.versions, v.event)
-			case jentry:
-				transitionLogIf(es.ctx, deleteObjectFromRemoteTier(es.ctx, v.ObjName, v.VersionID, v.TierName))
-			case freeVersionTask:
-				oi := v.ObjectInfo
-				traceFn := globalLifecycleSys.trace(oi)
-				if !oi.TransitionedObject.FreeVersion {
-					// nothing to be done
-					continue
-				}
-
-				ignoreNotFoundErr := func(err error) error {
-					switch {
-					case isErrVersionNotFound(err), isErrObjectNotFound(err):
-						return nil
-					}
-					return err
-				}
-				// Remove the remote object
-				err := deleteObjectFromRemoteTier(es.ctx, oi.TransitionedObject.Name, oi.TransitionedObject.VersionID, oi.TransitionedObject.Tier)
-				if ignoreNotFoundErr(err) != nil {
-					transitionLogIf(es.ctx, err)
-					traceFn(ILMFreeVersionDelete, nil, err)
-					continue
-				}
-
-				// Remove this free version
-				_, err = es.objAPI.DeleteObject(es.ctx, oi.Bucket, oi.Name, ObjectOptions{
-					VersionID:        oi.VersionID,
-					InclFreeVersions: true,
-				})
-				if err == nil {
-					auditLogLifecycle(es.ctx, oi, ILMFreeVersionDelete, nil, traceFn)
-				}
-				if ignoreNotFoundErr(err) != nil {
-					transitionLogIf(es.ctx, err)
-				}
-			default:
-				bugLogIf(es.ctx, fmt.Errorf("Invalid work type - %v", v))
-			}
-		}
+func newExpiryState() *expiryState {
+	return &expiryState{
+		expiryCh: make(chan expiryTask, 10000),
 	}
 }
 
 func initBackgroundExpiry(ctx context.Context, objectAPI ObjectLayer) {
-	globalExpiryState = newExpiryState(ctx, objectAPI, globalILMConfig.getExpirationWorkers())
-}
-
-// newerNoncurrentTask encapsulates arguments required by worker to expire objects
-// by NewerNoncurrentVersions
-type newerNoncurrentTask struct {
-	bucket   string
-	versions []ObjectToDelete
-	event    lifecycle.Event
-}
-
-type transitionTask struct {
-	objInfo ObjectInfo
-	src     lcEventSrc
-	event   lifecycle.Event
+	globalExpiryState = newExpiryState()
+	go func() {
+		for t := range globalExpiryState.expiryCh {
+			applyExpiryRule(ctx, objectAPI, t.objInfo, false, t.versionExpiry)
+		}
+	}()
 }
 
 type transitionState struct {
-	transitionCh chan transitionTask
-
-	ctx        context.Context
-	objAPI     ObjectLayer
-	mu         sync.Mutex
-	numWorkers int
-	killCh     chan struct{}
-
-	activeTasks          atomic.Int64
-	missedImmediateTasks atomic.Int64
-
-	lastDayMu    sync.RWMutex
-	lastDayStats map[string]*lastDayTierStats
+	once sync.Once
+	// add future metrics here
+	transitionCh chan ObjectInfo
 }
 
-func (t *transitionState) queueTransitionTask(oi ObjectInfo, event lifecycle.Event, src lcEventSrc) {
-	task := transitionTask{objInfo: oi, event: event, src: src}
+func (t *transitionState) queueTransitionTask(oi ObjectInfo) {
 	select {
-	case <-t.ctx.Done():
-	case t.transitionCh <- task:
+	case <-GlobalContext.Done():
+		t.once.Do(func() {
+			close(t.transitionCh)
+		})
+	case t.transitionCh <- oi:
 	default:
-		switch src {
-		case lcEventSrc_s3PutObject, lcEventSrc_s3CopyObject, lcEventSrc_s3CompleteMultipartUpload:
-			// Update missed immediate tasks only for incoming requests.
-			t.missedImmediateTasks.Add(1)
-		}
 	}
 }
 
-var globalTransitionState *transitionState
+var (
+	globalTransitionState      *transitionState
+	globalTransitionConcurrent = runtime.GOMAXPROCS(0) / 2
+)
 
-// newTransitionState returns a transitionState object ready to be initialized
-// via its Init method.
-func newTransitionState(ctx context.Context) *transitionState {
+func newTransitionState() *transitionState {
+	// fix minimum concurrent transition to 1 for single CPU setup
+	if globalTransitionConcurrent == 0 {
+		globalTransitionConcurrent = 1
+	}
 	return &transitionState{
-		transitionCh: make(chan transitionTask, 100000),
-		ctx:          ctx,
-		killCh:       make(chan struct{}),
-		lastDayStats: make(map[string]*lastDayTierStats),
+		transitionCh: make(chan ObjectInfo, 10000),
 	}
 }
 
-// Init initializes t with given objAPI and instantiates the configured number
-// of transition workers.
-func (t *transitionState) Init(objAPI ObjectLayer) {
-	n := globalAPIConfig.getTransitionWorkers()
-	// Prefer ilm.transition_workers over now deprecated api.transition_workers
-	if tw := globalILMConfig.getTransitionWorkers(); tw > 0 {
-		n = tw
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	t.objAPI = objAPI
-	t.updateWorkers(n)
-}
-
-// PendingTasks returns the number of ILM transition tasks waiting for a worker
-// goroutine.
-func (t *transitionState) PendingTasks() int {
-	return len(t.transitionCh)
-}
-
-// ActiveTasks returns the number of active (ongoing) ILM transition tasks.
-func (t *transitionState) ActiveTasks() int64 {
-	return t.activeTasks.Load()
-}
-
-// MissedImmediateTasks returns the number of tasks - deferred to scanner due
-// to tasks channel being backlogged.
-func (t *transitionState) MissedImmediateTasks() int64 {
-	return t.missedImmediateTasks.Load()
-}
-
-// worker waits for transition tasks
-func (t *transitionState) worker(objectAPI ObjectLayer) {
-	for {
-		select {
-		case <-t.killCh:
-			return
-		case <-t.ctx.Done():
-			return
-		case task, ok := <-t.transitionCh:
-			if !ok {
+// addWorker creates a new worker to process tasks
+func (t *transitionState) addWorker(ctx context.Context, objectAPI ObjectLayer) {
+	// Add a new worker.
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
 				return
+			case oi, ok := <-t.transitionCh:
+				if !ok {
+					return
+				}
+				if err := transitionObject(ctx, objectAPI, oi); err != nil {
+					logger.LogIf(ctx, err)
+				}
 			}
-			t.activeTasks.Add(1)
-			if err := transitionObject(t.ctx, objectAPI, task.objInfo, newLifecycleAuditEvent(task.src, task.event)); err != nil {
-				if !isErrVersionNotFound(err) && !isErrObjectNotFound(err) && !xnet.IsNetworkOrHostDown(err, false) {
-					if !strings.Contains(err.Error(), "use of closed network connection") {
-						transitionLogIf(t.ctx, fmt.Errorf("Transition to %s failed for %s/%s version:%s with %w",
-							task.event.StorageClass, task.objInfo.Bucket, task.objInfo.Name, task.objInfo.VersionID, err))
-					}
-				}
-			} else {
-				ts := tierStats{
-					TotalSize:   uint64(task.objInfo.Size),
-					NumVersions: 1,
-				}
-				if task.objInfo.IsLatest {
-					ts.NumObjects = 1
-				}
-				t.addLastDayStats(task.event.StorageClass, ts)
-			}
-			t.activeTasks.Add(-1)
 		}
-	}
+	}()
 }
 
-func (t *transitionState) addLastDayStats(tier string, ts tierStats) {
-	t.lastDayMu.Lock()
-	defer t.lastDayMu.Unlock()
-
-	if _, ok := t.lastDayStats[tier]; !ok {
-		t.lastDayStats[tier] = &lastDayTierStats{}
-	}
-	t.lastDayStats[tier].addStats(ts)
-}
-
-func (t *transitionState) getDailyAllTierStats() DailyAllTierStats {
-	t.lastDayMu.RLock()
-	defer t.lastDayMu.RUnlock()
-
-	res := make(DailyAllTierStats, len(t.lastDayStats))
-	for tier, st := range t.lastDayStats {
-		res[tier] = st.clone()
-	}
-	return res
-}
-
-// UpdateWorkers at the end of this function leaves n goroutines waiting for
-// transition tasks
-func (t *transitionState) UpdateWorkers(n int) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.objAPI == nil { // Init hasn't been called yet.
+func initBackgroundTransition(ctx context.Context, objectAPI ObjectLayer) {
+	if globalTransitionState == nil {
 		return
 	}
-	t.updateWorkers(n)
-}
 
-func (t *transitionState) updateWorkers(n int) {
-	if n == 0 {
-		n = 100
-	}
-
-	for t.numWorkers < n {
-		go t.worker(t.objAPI)
-		t.numWorkers++
-	}
-
-	for t.numWorkers > n {
-		go func() { t.killCh <- struct{}{} }()
-		t.numWorkers--
+	// Start with globalTransitionConcurrent.
+	for i := 0; i < globalTransitionConcurrent; i++ {
+		globalTransitionState.addWorker(ctx, objectAPI)
 	}
 }
 
-var errInvalidStorageClass = errors.New("invalid storage class")
-
-func validateTransitionTier(lc *lifecycle.Lifecycle) error {
-	for _, rule := range lc.Rules {
+func validateLifecycleTransition(ctx context.Context, bucket string, lfc *lifecycle.Lifecycle) error {
+	for _, rule := range lfc.Rules {
 		if rule.Transition.StorageClass != "" {
-			if valid := globalTierConfigMgr.IsTierValid(rule.Transition.StorageClass); !valid {
-				return errInvalidStorageClass
+			sameTarget, destbucket, err := validateTransitionDestination(ctx, bucket, rule.Transition.StorageClass)
+			if err != nil {
+				return err
 			}
-		}
-		if rule.NoncurrentVersionTransition.StorageClass != "" {
-			if valid := globalTierConfigMgr.IsTierValid(rule.NoncurrentVersionTransition.StorageClass); !valid {
-				return errInvalidStorageClass
+			if sameTarget && destbucket == bucket {
+				return fmt.Errorf("Transition destination cannot be the same as the source bucket")
 			}
 		}
 	}
 	return nil
 }
 
-// enqueueTransitionImmediate enqueues obj for transition if eligible.
-// This is to be called after a successful upload of an object (version).
-func enqueueTransitionImmediate(obj ObjectInfo, src lcEventSrc) {
-	if lc, err := globalLifecycleSys.Get(obj.Bucket); err == nil {
-		switch event := lc.Eval(obj.ToLifecycleOpts()); event.Action {
-		case lifecycle.TransitionAction, lifecycle.TransitionVersionAction:
-			if obj.DeleteMarker || obj.IsDir {
-				// nothing to transition
-				return
-			}
-			globalTransitionState.queueTransitionTask(obj, event, src)
-		}
+// validateTransitionDestination returns error if transition destination bucket missing or not configured
+// It also returns true if transition destination is same as this server.
+func validateTransitionDestination(ctx context.Context, bucket string, targetLabel string) (bool, string, error) {
+	tgt := globalBucketTargetSys.GetRemoteTargetWithLabel(ctx, bucket, targetLabel)
+	if tgt == nil {
+		return false, "", BucketRemoteTargetNotFound{Bucket: bucket}
 	}
+	arn, err := madmin.ParseARN(tgt.Arn)
+	if err != nil {
+		return false, "", BucketRemoteTargetNotFound{Bucket: bucket}
+	}
+	if arn.Type != madmin.ILMService {
+		return false, "", BucketRemoteArnTypeInvalid{}
+	}
+	clnt := globalBucketTargetSys.GetRemoteTargetClient(ctx, tgt.Arn)
+	if clnt == nil {
+		return false, "", BucketRemoteTargetNotFound{Bucket: bucket}
+	}
+	if found, _ := clnt.BucketExists(ctx, arn.Bucket); !found {
+		return false, "", BucketRemoteDestinationNotFound{Bucket: arn.Bucket}
+	}
+	sameTarget, _ := isLocalHost(clnt.EndpointURL().Hostname(), clnt.EndpointURL().Port(), globalMinioPort)
+	return sameTarget, arn.Bucket, nil
 }
 
-// expireTransitionedObject handles expiry of transitioned/restored objects
-// (versions) in one of the following situations:
-//
-// 1. when a restored (via PostRestoreObject API) object expires.
-// 2. when a transitioned object expires (based on an ILM rule).
-func expireTransitionedObject(ctx context.Context, objectAPI ObjectLayer, oi *ObjectInfo, lcEvent lifecycle.Event, src lcEventSrc) error {
-	traceFn := globalLifecycleSys.trace(*oi)
-	opts := ObjectOptions{
-		Versioned:  globalBucketVersioningSys.PrefixEnabled(oi.Bucket, oi.Name),
-		Expiration: ExpirationOptions{Expire: true},
+// transitionSC returns storage class label for this bucket
+func transitionSC(ctx context.Context, bucket string) string {
+	cfg, err := globalBucketMetadataSys.GetLifecycleConfig(bucket)
+	if err != nil {
+		return ""
 	}
-	if lcEvent.Action.DeleteVersioned() {
-		opts.VersionID = oi.VersionID
+	for _, rule := range cfg.Rules {
+		if rule.Status == Disabled {
+			continue
+		}
+		if rule.Transition.StorageClass != "" {
+			return rule.Transition.StorageClass
+		}
 	}
-	tags := newLifecycleAuditEvent(src, lcEvent).Tags()
-	if lcEvent.Action.DeleteRestored() {
+	return ""
+}
+
+// return true if ARN representing transition storage class is present in a active rule
+// for the lifecycle configured on this bucket
+func transitionSCInUse(ctx context.Context, lfc *lifecycle.Lifecycle, bucket, arnStr string) bool {
+	tgtLabel := globalBucketTargetSys.GetRemoteLabelWithArn(ctx, bucket, arnStr)
+	if tgtLabel == "" {
+		return false
+	}
+	for _, rule := range lfc.Rules {
+		if rule.Status == Disabled {
+			continue
+		}
+		if rule.Transition.StorageClass != "" && rule.Transition.StorageClass == tgtLabel {
+			return true
+		}
+	}
+	return false
+}
+
+// set PutObjectOptions for PUT operation to transition data to target cluster
+func putTransitionOpts(objInfo ObjectInfo) (putOpts miniogo.PutObjectOptions, err error) {
+	meta := make(map[string]string)
+
+	putOpts = miniogo.PutObjectOptions{
+		UserMetadata:    meta,
+		ContentType:     objInfo.ContentType,
+		ContentEncoding: objInfo.ContentEncoding,
+		StorageClass:    objInfo.StorageClass,
+		Internal: miniogo.AdvancedPutOptions{
+			SourceVersionID: objInfo.VersionID,
+			SourceMTime:     objInfo.ModTime,
+			SourceETag:      objInfo.ETag,
+		},
+	}
+
+	if objInfo.UserTags != "" {
+		tag, _ := tags.ParseObjectTags(objInfo.UserTags)
+		if tag != nil {
+			putOpts.UserTags = tag.ToMap()
+		}
+	}
+
+	lkMap := caseInsensitiveMap(objInfo.UserDefined)
+	if lang, ok := lkMap.Lookup(xhttp.ContentLanguage); ok {
+		putOpts.ContentLanguage = lang
+	}
+	if disp, ok := lkMap.Lookup(xhttp.ContentDisposition); ok {
+		putOpts.ContentDisposition = disp
+	}
+	if cc, ok := lkMap.Lookup(xhttp.CacheControl); ok {
+		putOpts.CacheControl = cc
+	}
+	if mode, ok := lkMap.Lookup(xhttp.AmzObjectLockMode); ok {
+		rmode := miniogo.RetentionMode(mode)
+		putOpts.Mode = rmode
+	}
+	if retainDateStr, ok := lkMap.Lookup(xhttp.AmzObjectLockRetainUntilDate); ok {
+		rdate, err := time.Parse(time.RFC3339, retainDateStr)
+		if err != nil {
+			return putOpts, err
+		}
+		putOpts.RetainUntilDate = rdate
+	}
+	if lhold, ok := lkMap.Lookup(xhttp.AmzObjectLockLegalHold); ok {
+		putOpts.LegalHold = miniogo.LegalHoldStatus(lhold)
+	}
+
+	return putOpts, nil
+}
+
+// handle deletes of transitioned objects or object versions when one of the following is true:
+// 1. temporarily restored copies of objects (restored with the PostRestoreObject API) expired.
+// 2. life cycle expiry date is met on the object.
+// 3. Object is removed through DELETE api call
+func deleteTransitionedObject(ctx context.Context, objectAPI ObjectLayer, bucket, object string, lcOpts lifecycle.ObjectOpts, restoredObject, isDeleteTierOnly bool) error {
+	if lcOpts.TransitionStatus == "" && !isDeleteTierOnly {
+		return nil
+	}
+	lc, err := globalLifecycleSys.Get(bucket)
+	if err != nil {
+		return err
+	}
+	arn := getLifecycleTransitionTargetArn(ctx, lc, bucket, lcOpts)
+	if arn == nil {
+		return fmt.Errorf("remote target not configured")
+	}
+	tgt := globalBucketTargetSys.GetRemoteTargetClient(ctx, arn.String())
+	if tgt == nil {
+		return fmt.Errorf("remote target not configured")
+	}
+
+	var opts ObjectOptions
+	opts.Versioned = globalBucketVersioningSys.Enabled(bucket)
+	opts.VersionID = lcOpts.VersionID
+	if restoredObject {
 		// delete locally restored copy of object or object version
 		// from the source, while leaving metadata behind. The data on
 		// transitioned tier lies untouched and still accessible
-		opts.Transition.ExpireRestored = true
-		_, err := objectAPI.DeleteObject(ctx, oi.Bucket, oi.Name, opts)
-		if err == nil {
-			// TODO consider including expiry of restored object to events we
-			// notify.
-			auditLogLifecycle(ctx, *oi, ILMExpiry, tags, traceFn)
-		}
+		opts.TransitionStatus = lcOpts.TransitionStatus
+		_, err = objectAPI.DeleteObject(ctx, bucket, object, opts)
 		return err
 	}
 
-	// Delete remote object from warm-tier
-	err := deleteObjectFromRemoteTier(ctx, oi.TransitionedObject.Name, oi.TransitionedObject.VersionID, oi.TransitionedObject.Tier)
-	if err == nil {
-		// Skip adding free version since we successfully deleted the
-		// remote object
-		opts.SkipFreeVersion = true
-	} else {
-		transitionLogIf(ctx, err)
+	// When an object is past expiry, delete the data from transitioned tier and
+	// metadata from source
+	if err := tgt.RemoveObject(context.Background(), arn.Bucket, object, miniogo.RemoveObjectOptions{VersionID: lcOpts.VersionID}); err != nil {
+		logger.LogIf(ctx, err)
 	}
 
-	// Now, delete object from hot-tier namespace
-	if _, err := objectAPI.DeleteObject(ctx, oi.Bucket, oi.Name, opts); err != nil {
+	if isDeleteTierOnly {
+		return nil
+	}
+
+	objInfo, err := objectAPI.DeleteObject(ctx, bucket, object, opts)
+	if err != nil {
 		return err
 	}
 
 	// Send audit for the lifecycle delete operation
-	defer auditLogLifecycle(ctx, *oi, ILMExpiry, tags, traceFn)
+	auditLogLifecycle(ctx, bucket, object)
 
 	eventName := event.ObjectRemovedDelete
-	if oi.DeleteMarker {
+	if lcOpts.DeleteMarker {
 		eventName = event.ObjectRemovedDeleteMarkerCreated
-	}
-	objInfo := ObjectInfo{
-		Name:         oi.Name,
-		VersionID:    oi.VersionID,
-		DeleteMarker: oi.DeleteMarker,
 	}
 	// Notify object deleted event.
 	sendEvent(eventArgs{
 		EventName:  eventName,
-		BucketName: oi.Bucket,
+		BucketName: bucket,
 		Object:     objInfo,
-		UserAgent:  "Internal: [ILM-Expiry]",
-		Host:       globalLocalNodeName,
+		Host:       "Internal: [ILM-EXPIRY]",
 	})
 
+	// should never reach here
 	return nil
-}
-
-// generate an object name for transitioned object
-func genTransitionObjName(bucket string) (string, error) {
-	u, err := uuid.NewRandom()
-	if err != nil {
-		return "", err
-	}
-	us := u.String()
-	hash := xxh3.HashString(pathJoin(globalDeploymentID(), bucket))
-	obj := fmt.Sprintf("%s/%s/%s/%s", strconv.FormatUint(hash, 16), us[0:2], us[2:4], us)
-	return obj, nil
 }
 
 // transition object to target specified by the transition ARN. When an object is transitioned to another
 // storage specified by the transition ARN, the metadata is left behind on source cluster and original content
 // is moved to the transition tier. Note that in the case of encrypted objects, entire encrypted stream is moved
 // to the transition tier without decrypting or re-encrypting.
-func transitionObject(ctx context.Context, objectAPI ObjectLayer, oi ObjectInfo, lae lcAuditEvent) (err error) {
-	timeILM := globalScannerMetrics.timeILM(lae.Action)
-	defer func() {
-		if err != nil {
-			return
-		}
-		timeILM(1)
-	}()
-
-	opts := ObjectOptions{
-		Transition: TransitionOptions{
-			Status: lifecycle.TransitionPending,
-			Tier:   lae.StorageClass,
-			ETag:   oi.ETag,
-		},
-		LifecycleAuditEvent: lae,
-		VersionID:           oi.VersionID,
-		Versioned:           globalBucketVersioningSys.PrefixEnabled(oi.Bucket, oi.Name),
-		VersionSuspended:    globalBucketVersioningSys.PrefixSuspended(oi.Bucket, oi.Name),
-		MTime:               oi.ModTime,
+func transitionObject(ctx context.Context, objectAPI ObjectLayer, objInfo ObjectInfo) error {
+	lc, err := globalLifecycleSys.Get(objInfo.Bucket)
+	if err != nil {
+		return err
 	}
-	return objectAPI.TransitionObject(ctx, oi.Bucket, oi.Name, opts)
-}
-
-type auditTierOp struct {
-	Tier             string `json:"tier"`
-	TimeToResponseNS int64  `json:"timeToResponseNS"`
-	OutputBytes      int64  `json:"tx,omitempty"`
-	Error            string `json:"error,omitempty"`
-}
-
-func (op auditTierOp) String() string {
-	// flattening the auditTierOp{} for audit
-	return fmt.Sprintf("tier:%s,respNS:%d,tx:%d,err:%s", op.Tier, op.TimeToResponseNS, op.OutputBytes, op.Error)
-}
-
-func auditTierActions(ctx context.Context, tier string, bytes int64) func(err error) {
-	startTime := time.Now()
-	return func(err error) {
-		// Record only when audit targets configured.
-		if len(logger.AuditTargets()) == 0 {
-			return
-		}
-
-		op := auditTierOp{
-			Tier:        tier,
-			OutputBytes: bytes,
-		}
-
-		if err == nil {
-			since := time.Since(startTime)
-			op.TimeToResponseNS = since.Nanoseconds()
-			globalTierMetrics.Observe(tier, since)
-			globalTierMetrics.logSuccess(tier)
-		} else {
-			op.Error = err.Error()
-			globalTierMetrics.logFailure(tier)
-		}
-
-		logger.GetReqInfo(ctx).AppendTags("tierStats", op.String())
+	lcOpts := lifecycle.ObjectOpts{
+		Name:     objInfo.Name,
+		UserTags: objInfo.UserTags,
 	}
+	arn := getLifecycleTransitionTargetArn(ctx, lc, objInfo.Bucket, lcOpts)
+	if arn == nil {
+		return fmt.Errorf("remote target not configured")
+	}
+	tgt := globalBucketTargetSys.GetRemoteTargetClient(ctx, arn.String())
+	if tgt == nil {
+		return fmt.Errorf("remote target not configured")
+	}
+
+	gr, err := objectAPI.GetObjectNInfo(ctx, objInfo.Bucket, objInfo.Name, nil, http.Header{}, readLock, ObjectOptions{
+		VersionID:        objInfo.VersionID,
+		TransitionStatus: lifecycle.TransitionPending,
+	})
+	if err != nil {
+		return err
+	}
+	oi := gr.ObjInfo
+	if oi.TransitionStatus == lifecycle.TransitionComplete {
+		gr.Close()
+		return nil
+	}
+
+	putOpts, err := putTransitionOpts(oi)
+	if err != nil {
+		gr.Close()
+		return err
+
+	}
+	if _, err = tgt.PutObject(ctx, arn.Bucket, oi.Name, gr, oi.Size, putOpts); err != nil {
+		gr.Close()
+		return err
+	}
+	gr.Close()
+
+	var opts ObjectOptions
+	opts.Versioned = globalBucketVersioningSys.Enabled(oi.Bucket)
+	opts.VersionID = oi.VersionID
+	opts.TransitionStatus = lifecycle.TransitionComplete
+	eventName := event.ObjectTransitionComplete
+
+	objInfo, err = objectAPI.DeleteObject(ctx, oi.Bucket, oi.Name, opts)
+	if err != nil {
+		eventName = event.ObjectTransitionFailed
+	}
+
+	// Notify object deleted event.
+	sendEvent(eventArgs{
+		EventName:  eventName,
+		BucketName: objInfo.Bucket,
+		Object:     objInfo,
+		Host:       "Internal: [ILM-Transition]",
+	})
+
+	return err
+}
+
+// getLifecycleTransitionTargetArn returns transition ARN for storage class specified in the config.
+func getLifecycleTransitionTargetArn(ctx context.Context, lc *lifecycle.Lifecycle, bucket string, obj lifecycle.ObjectOpts) *madmin.ARN {
+	for _, rule := range lc.FilterActionableRules(obj) {
+		if rule.Transition.StorageClass != "" {
+			return globalBucketTargetSys.GetRemoteArnWithLabel(ctx, bucket, rule.Transition.StorageClass)
+		}
+	}
+	return nil
 }
 
 // getTransitionedObjectReader returns a reader from the transitioned tier.
 func getTransitionedObjectReader(ctx context.Context, bucket, object string, rs *HTTPRangeSpec, h http.Header, oi ObjectInfo, opts ObjectOptions) (gr *GetObjectReader, err error) {
-	tgtClient, err := globalTierConfigMgr.getDriver(ctx, oi.TransitionedObject.Tier)
-	if err != nil {
-		return nil, fmt.Errorf("transition storage class not configured: %w", err)
-	}
-
-	fn, off, length, err := NewGetObjectReader(rs, oi, opts, h)
-	if err != nil {
-		return nil, ErrorRespToObjectError(err, bucket, object)
-	}
-	gopts := WarmBackendGetOpts{}
-
-	// get correct offsets for object
-	if off >= 0 && length >= 0 {
-		gopts.startOffset = off
-		gopts.length = length
-	}
-
-	timeTierAction := auditTierActions(ctx, oi.TransitionedObject.Tier, length)
-	reader, err := tgtClient.Get(ctx, oi.TransitionedObject.Name, remoteVersionID(oi.TransitionedObject.VersionID), gopts)
+	var lc *lifecycle.Lifecycle
+	lc, err = globalLifecycleSys.Get(bucket)
 	if err != nil {
 		return nil, err
 	}
-	closer := func() {
-		timeTierAction(reader.Close())
+
+	arn := getLifecycleTransitionTargetArn(ctx, lc, bucket, lifecycle.ObjectOpts{
+		Name:         object,
+		UserTags:     oi.UserTags,
+		ModTime:      oi.ModTime,
+		VersionID:    oi.VersionID,
+		DeleteMarker: oi.DeleteMarker,
+		IsLatest:     oi.IsLatest,
+	})
+	if arn == nil {
+		return nil, fmt.Errorf("remote target not configured")
 	}
-	return fn(reader, h, closer)
+	tgt := globalBucketTargetSys.GetRemoteTargetClient(ctx, arn.String())
+	if tgt == nil {
+		return nil, fmt.Errorf("remote target not configured")
+	}
+	fn, off, length, err := NewGetObjectReader(rs, oi, opts)
+	if err != nil {
+		return nil, ErrorRespToObjectError(err, bucket, object)
+	}
+	gopts := miniogo.GetObjectOptions{VersionID: opts.VersionID}
+
+	// get correct offsets for encrypted object
+	if off >= 0 && length >= 0 {
+		if err := gopts.SetRange(off, off+length-1); err != nil {
+			return nil, ErrorRespToObjectError(err, bucket, object)
+		}
+	}
+
+	reader, err := tgt.GetObject(ctx, arn.Bucket, object, gopts)
+	if err != nil {
+		return nil, err
+	}
+	closeReader := func() { reader.Close() }
+
+	return fn(reader, h, opts.CheckPrecondFn, closeReader)
 }
 
 // RestoreRequestType represents type of restore.
@@ -784,9 +496,9 @@ const (
 
 // Encryption specifies encryption setting on restored bucket
 type Encryption struct {
-	EncryptionType sse.Algorithm `xml:"EncryptionType"`
-	KMSContext     string        `xml:"KMSContext,omitempty"`
-	KMSKeyID       string        `xml:"KMSKeyId,omitempty"`
+	EncryptionType sse.SSEAlgorithm `xml:"EncryptionType"`
+	KMSContext     string           `xml:"KMSContext,omitempty"`
+	KMSKeyID       string           `xml:"KMSKeyId,omitempty"`
 }
 
 // MetadataEntry denotes name and value.
@@ -825,7 +537,9 @@ func (sp *SelectParameters) IsEmpty() bool {
 	return sp == nil
 }
 
-var selectParamsXMLName = "SelectParameters"
+var (
+	selectParamsXMLName = "SelectParameters"
+)
 
 // UnmarshalXML - decodes XML data.
 func (sp *SelectParameters) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
@@ -841,7 +555,7 @@ type RestoreObjectRequest struct {
 	XMLName          xml.Name           `xml:"http://s3.amazonaws.com/doc/2006-03-01/ RestoreRequest" json:"-"`
 	Days             int                `xml:"Days,omitempty"`
 	Type             RestoreRequestType `xml:"Type,omitempty"`
-	Tier             string             `xml:"Tier"`
+	Tier             string             `xml:"Tier,-"`
 	Description      string             `xml:"Description,omitempty"`
 	SelectParameters *SelectParameters  `xml:"SelectParameters,omitempty"`
 	OutputLocation   OutputLocation     `xml:"OutputLocation,omitempty"`
@@ -883,7 +597,7 @@ func (r *RestoreObjectRequest) validate(ctx context.Context, objAPI ObjectLayer)
 	}
 	// Check if bucket exists.
 	if !r.OutputLocation.IsEmpty() {
-		if _, err := objAPI.GetBucketInfo(ctx, r.OutputLocation.S3.BucketName, BucketOptions{}); err != nil {
+		if _, err := objAPI.GetBucketInfo(ctx, r.OutputLocation.S3.BucketName); err != nil {
 			return err
 		}
 		if r.OutputLocation.S3.Prefix == "" {
@@ -894,36 +608,6 @@ func (r *RestoreObjectRequest) validate(ctx context.Context, objAPI ObjectLayer)
 		}
 	}
 	return nil
-}
-
-// postRestoreOpts returns ObjectOptions with version-id from the POST restore object request for a given bucket and object.
-func postRestoreOpts(ctx context.Context, r *http.Request, bucket, object string) (opts ObjectOptions, err error) {
-	versioned := globalBucketVersioningSys.PrefixEnabled(bucket, object)
-	versionSuspended := globalBucketVersioningSys.PrefixSuspended(bucket, object)
-	vid := strings.TrimSpace(r.Form.Get(xhttp.VersionID))
-	if vid != "" && vid != nullVersionID {
-		_, err := uuid.Parse(vid)
-		if err != nil {
-			s3LogIf(ctx, err)
-			return opts, InvalidVersionID{
-				Bucket:    bucket,
-				Object:    object,
-				VersionID: vid,
-			}
-		}
-		if !versioned && !versionSuspended {
-			return opts, InvalidArgument{
-				Bucket: bucket,
-				Object: object,
-				Err:    fmt.Errorf("version-id specified %s but versioning is not enabled on %s", opts.VersionID, bucket),
-			}
-		}
-	}
-	return ObjectOptions{
-		Versioned:        versioned,
-		VersionSuspended: versionSuspended,
-		VersionID:        vid,
-	}, nil
 }
 
 // set ObjectOptions for PUT call to restore temporary copy of transitioned data
@@ -937,7 +621,7 @@ func putRestoreOpts(bucket, object string, rreq *RestoreObjectRequest, objInfo O
 
 	if rreq.Type == SelectRestoreRequest {
 		for _, v := range rreq.OutputLocation.S3.UserMetadata {
-			if !stringsHasPrefixFold(v.Name, "x-amz-meta") {
+			if !strings.HasPrefix("x-amz-meta", strings.ToLower(v.Name)) {
 				meta["x-amz-meta-"+v.Name] = v.Value
 				continue
 			}
@@ -950,8 +634,8 @@ func putRestoreOpts(bucket, object string, rreq *RestoreObjectRequest, objInfo O
 			meta[xhttp.AmzServerSideEncryption] = xhttp.AmzEncryptionAES
 		}
 		return ObjectOptions{
-			Versioned:        globalBucketVersioningSys.PrefixEnabled(bucket, object),
-			VersionSuspended: globalBucketVersioningSys.PrefixSuspended(bucket, object),
+			Versioned:        globalBucketVersioningSys.Enabled(bucket),
+			VersionSuspended: globalBucketVersioningSys.Suspended(bucket),
 			UserDefined:      meta,
 		}
 	}
@@ -961,12 +645,10 @@ func putRestoreOpts(bucket, object string, rreq *RestoreObjectRequest, objInfo O
 	if len(objInfo.UserTags) != 0 {
 		meta[xhttp.AmzObjectTagging] = objInfo.UserTags
 	}
-	// Set restore object status
-	restoreExpiry := lifecycle.ExpectedExpiryTime(time.Now().UTC(), rreq.Days)
-	meta[xhttp.AmzRestore] = completedRestoreObj(restoreExpiry).String()
+
 	return ObjectOptions{
-		Versioned:        globalBucketVersioningSys.PrefixEnabled(bucket, object),
-		VersionSuspended: globalBucketVersioningSys.PrefixSuspended(bucket, object),
+		Versioned:        globalBucketVersioningSys.Enabled(bucket),
+		VersionSuspended: globalBucketVersioningSys.Suspended(bucket),
 		UserDefined:      meta,
 		VersionID:        objInfo.VersionID,
 		MTime:            objInfo.ModTime,
@@ -974,147 +656,60 @@ func putRestoreOpts(bucket, object string, rreq *RestoreObjectRequest, objInfo O
 	}
 }
 
-var errRestoreHDRMalformed = fmt.Errorf("x-amz-restore header malformed")
+var (
+	errRestoreHDRMissing   = fmt.Errorf("x-amz-restore header not found")
+	errRestoreHDRMalformed = fmt.Errorf("x-amz-restore header malformed")
+)
 
-// IsRemote returns true if this object version's contents are in its remote
-// tier.
-func (fi FileInfo) IsRemote() bool {
-	if fi.TransitionStatus != lifecycle.TransitionComplete {
-		return false
+// parse x-amz-restore header from user metadata to get the status of ongoing request and expiry of restoration
+// if any. This header value is of format: ongoing-request=true|false, expires=time
+func parseRestoreHeaderFromMeta(meta map[string]string) (ongoing bool, expiry time.Time, err error) {
+	restoreHdr, ok := meta[xhttp.AmzRestore]
+	if !ok {
+		return ongoing, expiry, errRestoreHDRMissing
 	}
-	return !isRestoredObjectOnDisk(fi.Metadata)
+	rslc := strings.SplitN(restoreHdr, ",", 2)
+	if len(rslc) != 2 {
+		return ongoing, expiry, errRestoreHDRMalformed
+	}
+	rstatusSlc := strings.SplitN(rslc[0], "=", 2)
+	if len(rstatusSlc) != 2 {
+		return ongoing, expiry, errRestoreHDRMalformed
+	}
+	rExpSlc := strings.SplitN(rslc[1], "=", 2)
+	if len(rExpSlc) != 2 {
+		return ongoing, expiry, errRestoreHDRMalformed
+	}
+
+	expiry, err = time.Parse(http.TimeFormat, rExpSlc[1])
+	if err != nil {
+		return
+	}
+	return rstatusSlc[1] == "true", expiry, nil
 }
 
-// IsRemote returns true if this object version's contents are in its remote
-// tier.
-func (oi ObjectInfo) IsRemote() bool {
-	if oi.TransitionedObject.Status != lifecycle.TransitionComplete {
-		return false
+// restoreTransitionedObject is similar to PostObjectRestore from AWS GLACIER
+// storage class. When PostObjectRestore API is called, a temporary copy of the object
+// is restored locally to the bucket on source cluster until the restore expiry date.
+// The copy that was transitioned continues to reside in the transitioned tier.
+func restoreTransitionedObject(ctx context.Context, bucket, object string, objAPI ObjectLayer, objInfo ObjectInfo, rreq *RestoreObjectRequest, restoreExpiry time.Time) error {
+	var rs *HTTPRangeSpec
+	gr, err := getTransitionedObjectReader(ctx, bucket, object, rs, http.Header{}, objInfo, ObjectOptions{
+		VersionID: objInfo.VersionID})
+	if err != nil {
+		return err
 	}
-	return !isRestoredObjectOnDisk(oi.UserDefined)
-}
-
-// restoreObjStatus represents a restore-object's status. It can be either
-// ongoing or completed.
-type restoreObjStatus struct {
-	ongoing bool
-	expiry  time.Time
-}
-
-// ongoingRestoreObj constructs restoreObjStatus for an ongoing restore-object.
-func ongoingRestoreObj() restoreObjStatus {
-	return restoreObjStatus{
-		ongoing: true,
+	defer gr.Close()
+	hashReader, err := hash.NewReader(gr, objInfo.Size, "", "", objInfo.Size)
+	if err != nil {
+		return err
 	}
-}
-
-// completedRestoreObj constructs restoreObjStatus for a completed restore-object with given expiry.
-func completedRestoreObj(expiry time.Time) restoreObjStatus {
-	return restoreObjStatus{
-		ongoing: false,
-		expiry:  expiry.UTC(),
-	}
-}
-
-// String returns x-amz-restore compatible representation of r.
-func (r restoreObjStatus) String() string {
-	if r.Ongoing() {
-		return `ongoing-request="true"`
-	}
-	return fmt.Sprintf(`ongoing-request="false", expiry-date="%s"`, r.expiry.Format(http.TimeFormat))
-}
-
-// Expiry returns expiry of restored object and true if restore-object has completed.
-// Otherwise returns zero value of time.Time and false.
-func (r restoreObjStatus) Expiry() (time.Time, bool) {
-	if r.Ongoing() {
-		return time.Time{}, false
-	}
-	return r.expiry, true
-}
-
-// Ongoing returns true if restore-object is ongoing.
-func (r restoreObjStatus) Ongoing() bool {
-	return r.ongoing
-}
-
-// OnDisk returns true if restored object contents exist in MinIO. Otherwise returns false.
-// The restore operation could be in one of the following states,
-// - in progress (no content on MinIO's disks yet)
-// - completed
-// - completed but expired (again, no content on MinIO's disks)
-func (r restoreObjStatus) OnDisk() bool {
-	if expiry, ok := r.Expiry(); ok && time.Now().UTC().Before(expiry) {
-		// completed
-		return true
-	}
-	return false // in progress or completed but expired
-}
-
-// parseRestoreObjStatus parses restoreHdr from AmzRestore header. If the value is valid it returns a
-// restoreObjStatus value with the status and expiry (if any). Otherwise returns
-// the empty value and an error indicating the parse failure.
-func parseRestoreObjStatus(restoreHdr string) (restoreObjStatus, error) {
-	tokens := strings.SplitN(restoreHdr, ",", 2)
-	progressTokens := strings.SplitN(tokens[0], "=", 2)
-	if len(progressTokens) != 2 {
-		return restoreObjStatus{}, errRestoreHDRMalformed
-	}
-	if strings.TrimSpace(progressTokens[0]) != "ongoing-request" {
-		return restoreObjStatus{}, errRestoreHDRMalformed
+	pReader := NewPutObjReader(hashReader)
+	opts := putRestoreOpts(bucket, object, rreq, objInfo)
+	opts.UserDefined[xhttp.AmzRestore] = fmt.Sprintf("ongoing-request=%t, expiry-date=%s", false, restoreExpiry.Format(http.TimeFormat))
+	if _, err := objAPI.PutObject(ctx, bucket, object, pReader, opts); err != nil {
+		return err
 	}
 
-	switch progressTokens[1] {
-	case "true", `"true"`: // true without double quotes is deprecated in Feb 2022
-		if len(tokens) == 1 {
-			return ongoingRestoreObj(), nil
-		}
-	case "false", `"false"`: // false without double quotes is deprecated in Feb 2022
-		if len(tokens) != 2 {
-			return restoreObjStatus{}, errRestoreHDRMalformed
-		}
-		expiryTokens := strings.SplitN(tokens[1], "=", 2)
-		if len(expiryTokens) != 2 {
-			return restoreObjStatus{}, errRestoreHDRMalformed
-		}
-		if strings.TrimSpace(expiryTokens[0]) != "expiry-date" {
-			return restoreObjStatus{}, errRestoreHDRMalformed
-		}
-		expiry, err := amztime.ParseHeader(strings.Trim(expiryTokens[1], `"`))
-		if err != nil {
-			return restoreObjStatus{}, errRestoreHDRMalformed
-		}
-		return completedRestoreObj(expiry), nil
-	}
-	return restoreObjStatus{}, errRestoreHDRMalformed
-}
-
-// isRestoredObjectOnDisk returns true if the restored object is on disk. Note
-// this function must be called only if object version's transition status is
-// complete.
-func isRestoredObjectOnDisk(meta map[string]string) (onDisk bool) {
-	if restoreHdr, ok := meta[xhttp.AmzRestore]; ok {
-		if restoreStatus, err := parseRestoreObjStatus(restoreHdr); err == nil {
-			return restoreStatus.OnDisk()
-		}
-	}
-	return onDisk
-}
-
-// ToLifecycleOpts returns lifecycle.ObjectOpts value for oi.
-func (oi ObjectInfo) ToLifecycleOpts() lifecycle.ObjectOpts {
-	return lifecycle.ObjectOpts{
-		Name:             oi.Name,
-		UserTags:         oi.UserTags,
-		VersionID:        oi.VersionID,
-		ModTime:          oi.ModTime,
-		Size:             oi.Size,
-		IsLatest:         oi.IsLatest,
-		NumVersions:      oi.NumVersions,
-		DeleteMarker:     oi.DeleteMarker,
-		SuccessorModTime: oi.SuccessorModTime,
-		RestoreOngoing:   oi.RestoreOngoing,
-		RestoreExpires:   oi.RestoreExpires,
-		TransitionStatus: oi.TransitionedObject.Status,
-	}
+	return nil
 }

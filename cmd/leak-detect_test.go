@@ -1,19 +1,6 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+// Copyright 2013 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
 
 package cmd
 
@@ -140,7 +127,7 @@ func pickRelevantGoroutines() (gs []string) {
 	buf := debug.Stack()
 	// runtime stack of go routines will be listed with 2 blank spaces between each of them, so split on "\n\n" .
 	for _, g := range strings.Split(string(buf), "\n\n") {
-		// Again split on a new line, the first line of the second half contains the info about the go routine.
+		// Again split on a new line, the first line of the second half contaisn the info about the go routine.
 		sl := strings.SplitN(g, "\n", 2)
 		if len(sl) != 2 {
 			continue

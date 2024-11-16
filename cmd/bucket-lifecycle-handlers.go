@@ -1,19 +1,18 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2019 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
@@ -21,14 +20,12 @@ import (
 	"encoding/xml"
 	"io"
 	"net/http"
-	"strconv"
-	"time"
 
-	"github.com/minio/minio/internal/bucket/lifecycle"
-	xhttp "github.com/minio/minio/internal/http"
-	"github.com/minio/minio/internal/logger"
-	"github.com/minio/mux"
-	"github.com/minio/pkg/v3/policy"
+	"github.com/gorilla/mux"
+	xhttp "github.com/minio/minio/cmd/http"
+	"github.com/minio/minio/cmd/logger"
+	"github.com/minio/minio/pkg/bucket/lifecycle"
+	"github.com/minio/minio/pkg/bucket/policy"
 )
 
 const (
@@ -45,7 +42,7 @@ func (api objectAPIHandlers) PutBucketLifecycleHandler(w http.ResponseWriter, r 
 
 	objAPI := api.ObjectAPI()
 	if objAPI == nil {
-		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrServerNotInitialized), r.URL)
+		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrServerNotInitialized), r.URL, guessIsBrowserReq(r))
 		return
 	}
 
@@ -54,83 +51,47 @@ func (api objectAPIHandlers) PutBucketLifecycleHandler(w http.ResponseWriter, r 
 
 	// PutBucketLifecycle always needs a Content-Md5
 	if _, ok := r.Header[xhttp.ContentMD5]; !ok {
-		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrMissingContentMD5), r.URL)
+		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrMissingContentMD5), r.URL, guessIsBrowserReq(r))
 		return
 	}
 
 	if s3Error := checkRequestAuthType(ctx, r, policy.PutBucketLifecycleAction, bucket, ""); s3Error != ErrNone {
-		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)
+		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL, guessIsBrowserReq(r))
 		return
 	}
 
 	// Check if bucket exists.
-	rcfg, err := globalBucketObjectLockSys.Get(bucket)
-	if err != nil {
-		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+	if _, err := objAPI.GetBucketInfo(ctx, bucket); err != nil {
+		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL, guessIsBrowserReq(r))
 		return
 	}
 
-	bucketLifecycle, err := lifecycle.ParseLifecycleConfigWithID(io.LimitReader(r.Body, r.ContentLength))
+	bucketLifecycle, err := lifecycle.ParseLifecycleConfig(io.LimitReader(r.Body, r.ContentLength))
 	if err != nil {
-		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL, guessIsBrowserReq(r))
 		return
 	}
 
 	// Validate the received bucket policy document
-	if err = bucketLifecycle.Validate(rcfg); err != nil {
-		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+	if err = bucketLifecycle.Validate(); err != nil {
+		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL, guessIsBrowserReq(r))
 		return
 	}
 
 	// Validate the transition storage ARNs
-	if err = validateTransitionTier(bucketLifecycle); err != nil {
-		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+	if err = validateLifecycleTransition(ctx, bucket, bucketLifecycle); err != nil {
+		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL, guessIsBrowserReq(r))
 		return
-	}
-
-	// Create a map of updated set of rules in request
-	updatedRules := make(map[string]lifecycle.Rule, len(bucketLifecycle.Rules))
-	for _, rule := range bucketLifecycle.Rules {
-		updatedRules[rule.ID] = rule
-	}
-
-	// Get list of rules for the bucket from disk
-	meta, err := globalBucketMetadataSys.GetConfigFromDisk(ctx, bucket)
-	if err != nil {
-		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
-		return
-	}
-	expiryRuleRemoved := false
-	if len(meta.LifecycleConfigXML) > 0 {
-		var lcCfg lifecycle.Lifecycle
-		if err := xml.Unmarshal(meta.LifecycleConfigXML, &lcCfg); err != nil {
-			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
-			return
-		}
-		for _, rl := range lcCfg.Rules {
-			updRule, ok := updatedRules[rl.ID]
-			// original rule had expiry that is no longer in the new config,
-			// or rule is present but missing expiration flags
-			if (!rl.Expiration.IsNull() || !rl.NoncurrentVersionExpiration.IsNull()) &&
-				(!ok || (updRule.Expiration.IsNull() && updRule.NoncurrentVersionExpiration.IsNull())) {
-				expiryRuleRemoved = true
-			}
-		}
-	}
-
-	if bucketLifecycle.HasExpiry() || expiryRuleRemoved {
-		currtime := time.Now()
-		bucketLifecycle.ExpiryUpdatedAt = &currtime
 	}
 
 	configData, err := xml.Marshal(bucketLifecycle)
 	if err != nil {
-		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL, guessIsBrowserReq(r))
 		return
 	}
 
-	if _, err = globalBucketMetadataSys.Update(ctx, bucket, bucketLifecycleConfig, configData); err != nil {
-		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+	if err = globalBucketMetadataSys.Update(bucket, bucketLifecycleConfig, configData); err != nil {
+		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL, guessIsBrowserReq(r))
 		return
 	}
 
@@ -146,51 +107,36 @@ func (api objectAPIHandlers) GetBucketLifecycleHandler(w http.ResponseWriter, r 
 
 	objAPI := api.ObjectAPI()
 	if objAPI == nil {
-		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrServerNotInitialized), r.URL)
+		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrServerNotInitialized), r.URL, guessIsBrowserReq(r))
 		return
 	}
 
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
 
-	var withUpdatedAt bool
-	if updatedAtStr := r.Form.Get("withUpdatedAt"); updatedAtStr != "" {
-		var err error
-		withUpdatedAt, err = strconv.ParseBool(updatedAtStr)
-		if err != nil {
-			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrInvalidLifecycleQueryParameter), r.URL)
-			return
-		}
-	}
-
 	if s3Error := checkRequestAuthType(ctx, r, policy.GetBucketLifecycleAction, bucket, ""); s3Error != ErrNone {
-		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)
+		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL, guessIsBrowserReq(r))
 		return
 	}
 
 	// Check if bucket exists.
-	if _, err := objAPI.GetBucketInfo(ctx, bucket, BucketOptions{}); err != nil {
-		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+	if _, err := objAPI.GetBucketInfo(ctx, bucket); err != nil {
+		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL, guessIsBrowserReq(r))
 		return
 	}
 
-	config, updatedAt, err := globalBucketMetadataSys.GetLifecycleConfig(bucket)
+	config, err := globalBucketMetadataSys.GetLifecycleConfig(bucket)
 	if err != nil {
-		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL, guessIsBrowserReq(r))
 		return
 	}
-	// explicitly set ExpiryUpdatedAt nil as its meant for internal consumption only
-	config.ExpiryUpdatedAt = nil
 
 	configData, err := xml.Marshal(config)
 	if err != nil {
-		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL, guessIsBrowserReq(r))
 		return
 	}
 
-	if withUpdatedAt {
-		w.Header().Set(xhttp.MinIOLifecycleCfgUpdatedAt, updatedAt.Format(iso8601Format))
-	}
 	// Write lifecycle configuration to client.
 	writeSuccessResponseXML(w, configData)
 }
@@ -203,7 +149,7 @@ func (api objectAPIHandlers) DeleteBucketLifecycleHandler(w http.ResponseWriter,
 
 	objAPI := api.ObjectAPI()
 	if objAPI == nil {
-		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrServerNotInitialized), r.URL)
+		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrServerNotInitialized), r.URL, guessIsBrowserReq(r))
 		return
 	}
 
@@ -211,18 +157,18 @@ func (api objectAPIHandlers) DeleteBucketLifecycleHandler(w http.ResponseWriter,
 	bucket := vars["bucket"]
 
 	if s3Error := checkRequestAuthType(ctx, r, policy.PutBucketLifecycleAction, bucket, ""); s3Error != ErrNone {
-		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)
+		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL, guessIsBrowserReq(r))
 		return
 	}
 
 	// Check if bucket exists.
-	if _, err := objAPI.GetBucketInfo(ctx, bucket, BucketOptions{}); err != nil {
-		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+	if _, err := objAPI.GetBucketInfo(ctx, bucket); err != nil {
+		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL, guessIsBrowserReq(r))
 		return
 	}
 
-	if _, err := globalBucketMetadataSys.Delete(ctx, bucket, bucketLifecycleConfig); err != nil {
-		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+	if err := globalBucketMetadataSys.Update(bucket, bucketLifecycleConfig, nil); err != nil {
+		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL, guessIsBrowserReq(r))
 		return
 	}
 

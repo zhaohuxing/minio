@@ -24,9 +24,9 @@ MinIO's erasure coded backend uses high speed [HighwayHash](https://github.com/m
 
 ## How are drives used for Erasure Code?
 
-MinIO divides the drives you provide into erasure-coding sets of *2 to 16* drives.  Therefore, the number of drives you present must be a multiple of one of these numbers.  Each object is written to a single erasure-coding set.
+MinIO divides the drives you provide into erasure-coding sets of *4 to 16* drives.  Therefore, the number of drives you present must be a multiple of one of these numbers.  Each object is written to a single erasure-coding set.
 
-Minio uses the largest possible EC set size which divides into the number of drives given. For example, *18 drives* are configured as *2 sets of 9 drives*, and *24 drives* are configured as *2 sets of 12 drives*.  This is true for scenarios when running MinIO as a standalone erasure coded deployment. In [distributed setup however node (affinity) based](https://min.io/docs/minio/linux/operations/install-deploy-manage/deploy-minio-multi-node-multi-drive.html) erasure stripe sizes are chosen.
+Minio uses the largest possible EC set size which divides into the number of drives given. For example, *18 drives* are configured as *2 sets of 9 drives*, and *24 drives* are configured as *2 sets of 12 drives*.  This is true for scenarios when running MinIO as a standalone erasure coded deployment. In [distributed setup however node (affinity) based](https://docs.minio.io/docs/distributed-minio-quickstart-guide.html) erasure stripe sizes are chosen.
 
 The drives should all be of approximately the same size.
 
@@ -34,7 +34,7 @@ The drives should all be of approximately the same size.
 
 ### 1. Prerequisites
 
-Install MinIO - [MinIO Quickstart Guide](https://min.io/docs/minio/linux/index.html#quickstart-for-linux)
+Install MinIO - [MinIO Quickstart Guide](https://docs.min.io/docs/minio-quickstart-guide)
 
 ### 2. Run MinIO Server with Erasure Code
 
@@ -44,13 +44,10 @@ Example: Start MinIO server in a 12 drives setup, using MinIO binary.
 minio server /data{1...12}
 ```
 
-Example: Start MinIO server in a 8 drives setup, using MinIO Docker image.
+Example: Start MinIO server in a 8 drives setup, using MinIO Docker image. 
 
 ```sh
-podman run \
-  -p 9000:9000 \
-  -p 9001:9001 \
-  --name minio \
+docker run -p 9000:9000 --name minio \
   -v /mnt/data1:/data1 \
   -v /mnt/data2:/data2 \
   -v /mnt/data3:/data3 \
@@ -59,7 +56,7 @@ podman run \
   -v /mnt/data6:/data6 \
   -v /mnt/data7:/data7 \
   -v /mnt/data8:/data8 \
-  quay.io/minio/minio server /data{1...8} --console-address ":9001"
+  minio/minio server /data{1...8}
 ```
 
 ### 3. Test your setup

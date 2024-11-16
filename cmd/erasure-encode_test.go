@@ -1,19 +1,18 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2016-2020 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
@@ -24,7 +23,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/dustin/go-humanize"
+	humanize "github.com/dustin/go-humanize"
 )
 
 type badDisk struct{ StorageAPI }
@@ -41,7 +40,11 @@ func (a badDisk) ReadFileStream(ctx context.Context, volume, path string, offset
 	return nil, errFaultyDisk
 }
 
-func (a badDisk) CreateFile(ctx context.Context, origvolume, volume, path string, size int64, reader io.Reader) error {
+func (a badDisk) UpdateBloomFilter(ctx context.Context, oldest, current uint64) (*bloomFilterResponse, error) {
+	return nil, errFaultyDisk
+}
+
+func (a badDisk) CreateFile(ctx context.Context, volume, path string, size int64, reader io.Reader) error {
 	return errFaultyDisk
 }
 
@@ -83,19 +86,21 @@ var erasureEncodeTests = []struct {
 
 func TestErasureEncode(t *testing.T) {
 	for i, test := range erasureEncodeTests {
-		setup, err := newErasureTestSetup(t, test.dataBlocks, test.onDisks-test.dataBlocks, test.blocksize)
+		setup, err := newErasureTestSetup(test.dataBlocks, test.onDisks-test.dataBlocks, test.blocksize)
 		if err != nil {
 			t.Fatalf("Test %d: failed to create test setup: %v", i, err)
 		}
 		disks := setup.disks
 		erasure, err := NewErasure(context.Background(), test.dataBlocks, test.onDisks-test.dataBlocks, test.blocksize)
 		if err != nil {
+			setup.Remove()
 			t.Fatalf("Test %d: failed to create ErasureStorage: %v", i, err)
 		}
 		buffer := make([]byte, test.blocksize, 2*test.blocksize)
 
 		data := make([]byte, test.data)
 		if _, err = io.ReadFull(rand.Reader, data); err != nil {
+			setup.Remove()
 			t.Fatalf("Test %d: failed to generate random test data: %v", i, err)
 		}
 		writers := make([]io.Writer, len(disks))
@@ -103,7 +108,7 @@ func TestErasureEncode(t *testing.T) {
 			if disk == OfflineDisk {
 				continue
 			}
-			writers[i] = newBitrotWriter(disk, "", "testbucket", "object", erasure.ShardFileSize(int64(len(data[test.offset:]))), test.algorithm, erasure.ShardSize())
+			writers[i] = newBitrotWriter(disk, "testbucket", "object", erasure.ShardFileSize(int64(len(data[test.offset:]))), test.algorithm, erasure.ShardSize(), false)
 		}
 		n, err := erasure.Encode(context.Background(), bytes.NewReader(data[test.offset:]), writers, buffer, erasure.dataBlocks+1)
 		closeBitrotWriters(writers)
@@ -127,7 +132,7 @@ func TestErasureEncode(t *testing.T) {
 				if disk == nil {
 					continue
 				}
-				writers[i] = newBitrotWriter(disk, "", "testbucket", "object2", erasure.ShardFileSize(int64(len(data[test.offset:]))), test.algorithm, erasure.ShardSize())
+				writers[i] = newBitrotWriter(disk, "testbucket", "object2", erasure.ShardFileSize(int64(len(data[test.offset:]))), test.algorithm, erasure.ShardSize(), false)
 			}
 			for j := range disks[:test.offDisks] {
 				switch w := writers[j].(type) {
@@ -154,16 +159,18 @@ func TestErasureEncode(t *testing.T) {
 				}
 			}
 		}
+		setup.Remove()
 	}
 }
 
 // Benchmarks
 
 func benchmarkErasureEncode(data, parity, dataDown, parityDown int, size int64, b *testing.B) {
-	setup, err := newErasureTestSetup(b, data, parity, blockSizeV2)
+	setup, err := newErasureTestSetup(data, parity, blockSizeV2)
 	if err != nil {
 		b.Fatalf("failed to create test setup: %v", err)
 	}
+	defer setup.Remove()
 	erasure, err := NewErasure(context.Background(), data, parity, blockSizeV2)
 	if err != nil {
 		b.Fatalf("failed to create ErasureStorage: %v", err)
@@ -188,11 +195,9 @@ func benchmarkErasureEncode(data, parity, dataDown, parityDown int, size int64, 
 			if disk == OfflineDisk {
 				continue
 			}
-			disk.Delete(context.Background(), "testbucket", "object", DeleteOptions{
-				Recursive: false,
-				Immediate: false,
-			})
-			writers[i] = newBitrotWriter(disk, "", "testbucket", "object", erasure.ShardFileSize(size), DefaultBitrotAlgorithm, erasure.ShardSize())
+			disk.Delete(context.Background(), "testbucket", "object", false)
+			writers[i] = newBitrotWriter(disk, "testbucket", "object",
+				erasure.ShardFileSize(size), DefaultBitrotAlgorithm, erasure.ShardSize(), false)
 		}
 		_, err := erasure.Encode(context.Background(), bytes.NewReader(content), writers, buffer, erasure.dataBlocks+1)
 		closeBitrotWriters(writers)

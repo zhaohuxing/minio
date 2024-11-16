@@ -1,35 +1,31 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2018-2020 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
 import (
-	"errors"
 	"fmt"
-	"net/url"
-	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 
-	"github.com/cespare/xxhash/v2"
 	"github.com/minio/minio-go/v7/pkg/set"
-	"github.com/minio/minio/internal/config"
-	"github.com/minio/pkg/v3/ellipses"
-	"github.com/minio/pkg/v3/env"
+	"github.com/minio/minio/cmd/config"
+	"github.com/minio/minio/pkg/ellipses"
+	"github.com/minio/minio/pkg/env"
 )
 
 // This file implements and supports ellipses pattern for
@@ -45,7 +41,7 @@ type endpointSet struct {
 
 // Supported set sizes this is used to find the optimal
 // single set size.
-var setSizes = []uint64{2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+var setSizes = []uint64{4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
 
 // getDivisibleSize - returns a greatest common divisor of
 // all the ellipses sizes.
@@ -93,7 +89,7 @@ func commonSetDriveCount(divisibleSize uint64, setCounts []uint64) (setSize uint
 // input argument patterns, the symmetry calculation is to ensure that
 // we also use uniform number of drives common across all ellipses patterns.
 func possibleSetCountsWithSymmetry(setCounts []uint64, argPatterns []ellipses.ArgPattern) []uint64 {
-	newSetCounts := make(map[uint64]struct{})
+	var newSetCounts = make(map[uint64]struct{})
 	for _, ss := range setCounts {
 		var symmetry bool
 		for _, argPattern := range argPatterns {
@@ -133,7 +129,7 @@ func possibleSetCountsWithSymmetry(setCounts []uint64, argPatterns []ellipses.Ar
 // on each index, this function also determines the final set size
 // The final set size has the affinity towards choosing smaller
 // indexes (total sets)
-func getSetIndexes(args []string, totalSizes []uint64, setDriveCount uint64, argPatterns []ellipses.ArgPattern) (setIndexes [][]uint64, err error) {
+func getSetIndexes(args []string, totalSizes []uint64, customSetDriveCount uint64, argPatterns []ellipses.ArgPattern) (setIndexes [][]uint64, err error) {
 	if len(totalSizes) == 0 || len(args) == 0 {
 		return nil, errInvalidArgument
 	}
@@ -141,7 +137,7 @@ func getSetIndexes(args []string, totalSizes []uint64, setDriveCount uint64, arg
 	setIndexes = make([][]uint64, len(totalSizes))
 	for _, totalSize := range totalSizes {
 		// Check if totalSize has minimum range upto setSize
-		if totalSize < setSizes[0] || totalSize < setDriveCount {
+		if totalSize < setSizes[0] || totalSize < customSetDriveCount {
 			msg := fmt.Sprintf("Incorrect number of endpoints provided %s", args)
 			return nil, config.ErrInvalidNumberOfErasureEndpoints(nil).Msg(msg)
 		}
@@ -159,18 +155,18 @@ func getSetIndexes(args []string, totalSizes []uint64, setDriveCount uint64, arg
 
 	setCounts := possibleSetCounts(commonSize)
 	if len(setCounts) == 0 {
-		msg := fmt.Sprintf("Incorrect number of endpoints provided %s, number of drives %d is not divisible by any supported erasure set sizes %d", args, commonSize, setSizes)
+		msg := fmt.Sprintf("Incorrect number of endpoints provided %s, number of disks %d is not divisible by any supported erasure set sizes %d", args, commonSize, setSizes)
 		return nil, config.ErrInvalidNumberOfErasureEndpoints(nil).Msg(msg)
 	}
 
 	var setSize uint64
 	// Custom set drive count allows to override automatic distribution.
 	// only meant if you want to further optimize drive distribution.
-	if setDriveCount > 0 {
+	if customSetDriveCount > 0 {
 		msg := fmt.Sprintf("Invalid set drive count. Acceptable values for %d number drives are %d", commonSize, setCounts)
 		var found bool
 		for _, ss := range setCounts {
-			if ss == setDriveCount {
+			if ss == customSetDriveCount {
 				found = true
 			}
 		}
@@ -179,13 +175,14 @@ func getSetIndexes(args []string, totalSizes []uint64, setDriveCount uint64, arg
 		}
 
 		// No automatic symmetry calculation expected, user is on their own
-		setSize = setDriveCount
+		setSize = customSetDriveCount
+		globalCustomErasureDriveCount = true
 	} else {
 		// Returns possible set counts with symmetry.
 		setCounts = possibleSetCountsWithSymmetry(setCounts, argPatterns)
 
 		if len(setCounts) == 0 {
-			msg := fmt.Sprintf("No symmetric distribution detected with input endpoints provided %s, drives %d cannot be spread symmetrically by any supported erasure set sizes %d", args, commonSize, setSizes)
+			msg := fmt.Sprintf("No symmetric distribution detected with input endpoints provided %s, disks %d cannot be spread symmetrically by any supported erasure set sizes %d", args, commonSize, setSizes)
 			return nil, config.ErrInvalidNumberOfErasureEndpoints(nil).Msg(msg)
 		}
 
@@ -195,7 +192,7 @@ func getSetIndexes(args []string, totalSizes []uint64, setDriveCount uint64, arg
 
 	// Check whether setSize is with the supported range.
 	if !isValidSetSize(setSize) {
-		msg := fmt.Sprintf("Incorrect number of endpoints provided %s, number of drives %d is not divisible by any supported erasure set sizes %d", args, commonSize, setSizes)
+		msg := fmt.Sprintf("Incorrect number of endpoints provided %s, number of disks %d is not divisible by any supported erasure set sizes %d", args, commonSize, setSizes)
 		return nil, config.ErrInvalidNumberOfErasureEndpoints(nil).Msg(msg)
 	}
 
@@ -209,7 +206,7 @@ func getSetIndexes(args []string, totalSizes []uint64, setDriveCount uint64, arg
 }
 
 // Returns all the expanded endpoints, each argument is expanded separately.
-func (s *endpointSet) getEndpoints() (endpoints []string) {
+func (s endpointSet) getEndpoints() (endpoints []string) {
 	if len(s.endpoints) != 0 {
 		return s.endpoints
 	}
@@ -226,7 +223,7 @@ func (s *endpointSet) getEndpoints() (endpoints []string) {
 // this function also intelligently decides on what will
 // be the right set size etc.
 func (s endpointSet) Get() (sets [][]string) {
-	k := uint64(0)
+	var k = uint64(0)
 	endpoints := s.getEndpoints()
 	for i := range s.setIndexes {
 		for j := range s.setIndexes[i] {
@@ -244,7 +241,7 @@ func getTotalSizes(argPatterns []ellipses.ArgPattern) []uint64 {
 	for _, argPattern := range argPatterns {
 		var totalSize uint64 = 1
 		for _, p := range argPattern {
-			totalSize *= uint64(len(p.Seq))
+			totalSize = totalSize * uint64(len(p.Seq))
 		}
 		totalSizes = append(totalSizes, totalSize)
 	}
@@ -254,8 +251,8 @@ func getTotalSizes(argPatterns []ellipses.ArgPattern) []uint64 {
 // Parses all arguments and returns an endpointSet which is a collection
 // of endpoints following the ellipses pattern, this is what is used
 // by the object layer for initializing itself.
-func parseEndpointSet(setDriveCount uint64, args ...string) (ep endpointSet, err error) {
-	argPatterns := make([]ellipses.ArgPattern, len(args))
+func parseEndpointSet(customSetDriveCount uint64, args ...string) (ep endpointSet, err error) {
+	var argPatterns = make([]ellipses.ArgPattern, len(args))
 	for i, arg := range args {
 		patterns, perr := ellipses.FindEllipsesPatterns(arg)
 		if perr != nil {
@@ -264,7 +261,7 @@ func parseEndpointSet(setDriveCount uint64, args ...string) (ep endpointSet, err
 		argPatterns[i] = patterns
 	}
 
-	ep.setIndexes, err = getSetIndexes(args, getTotalSizes(argPatterns), setDriveCount, argPatterns)
+	ep.setIndexes, err = getSetIndexes(args, getTotalSizes(argPatterns), customSetDriveCount, argPatterns)
 	if err != nil {
 		return endpointSet{}, config.ErrInvalidErasureEndpoints(nil).Msg(err.Error())
 	}
@@ -279,14 +276,23 @@ func parseEndpointSet(setDriveCount uint64, args ...string) (ep endpointSet, err
 // specific set size.
 // For example: {1...64} is divided into 4 sets each of size 16.
 // This applies to even distributed setup syntax as well.
-func GetAllSets(setDriveCount uint64, args ...string) ([][]string, error) {
+func GetAllSets(args ...string) ([][]string, error) {
+	var customSetDriveCount uint64
+	if v := env.Get(EnvErasureSetDriveCount, ""); v != "" {
+		driveCount, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, config.ErrInvalidErasureSetSize(err)
+		}
+		customSetDriveCount = uint64(driveCount)
+	}
+
 	var setArgs [][]string
 	if !ellipses.HasEllipses(args...) {
 		var setIndexes [][]uint64
 		// Check if we have more one args.
 		if len(args) > 1 {
 			var err error
-			setIndexes, err = getSetIndexes(args, []uint64{uint64(len(args))}, setDriveCount, nil)
+			setIndexes, err = getSetIndexes(args, []uint64{uint64(len(args))}, customSetDriveCount, nil)
 			if err != nil {
 				return nil, err
 			}
@@ -300,7 +306,7 @@ func GetAllSets(setDriveCount uint64, args ...string) ([][]string, error) {
 		}
 		setArgs = s.Get()
 	} else {
-		s, err := parseEndpointSet(setDriveCount, args...)
+		s, err := parseEndpointSet(customSetDriveCount, args...)
 		if err != nil {
 			return nil, err
 		}
@@ -311,7 +317,7 @@ func GetAllSets(setDriveCount uint64, args ...string) ([][]string, error) {
 	for _, sargs := range setArgs {
 		for _, arg := range sargs {
 			if uniqueArgs.Contains(arg) {
-				return nil, config.ErrInvalidErasureEndpoints(nil).Msgf("Input args (%s) has duplicate ellipses", args)
+				return nil, config.ErrInvalidErasureEndpoints(nil).Msg(fmt.Sprintf("Input args (%s) has duplicate ellipses", args))
 			}
 			uniqueArgs.Add(arg)
 		}
@@ -325,199 +331,61 @@ const (
 	EnvErasureSetDriveCount = "MINIO_ERASURE_SET_DRIVE_COUNT"
 )
 
-type node struct {
-	nodeName string
-	disks    []string
-}
-
-type endpointsList []node
-
-func (el *endpointsList) add(arg string) error {
-	u, err := url.Parse(arg)
-	if err != nil {
-		return err
-	}
-	found := false
-	list := *el
-	for i := range list {
-		if list[i].nodeName == u.Host {
-			list[i].disks = append(list[i].disks, u.String())
-			found = true
-			break
-		}
-	}
-	if !found {
-		list = append(list, node{nodeName: u.Host, disks: []string{u.String()}})
-	}
-	*el = list
-	return nil
-}
-
-type poolArgs struct {
-	args          []string
-	setDriveCount uint64
-}
-
-// buildDisksLayoutFromConfFile supports with and without ellipses transparently.
-func buildDisksLayoutFromConfFile(pools []poolArgs) (layout disksLayout, err error) {
-	if len(pools) == 0 {
-		return layout, errInvalidArgument
-	}
-
-	for _, list := range pools {
-		var endpointsList endpointsList
-
-		for _, arg := range list.args {
-			switch {
-			case ellipses.HasList(arg):
-				patterns, err := ellipses.FindListPatterns(arg)
-				if err != nil {
-					return layout, err
-				}
-				for _, exp := range patterns.Expand() {
-					for _, ep := range exp {
-						if err := endpointsList.add(ep); err != nil {
-							return layout, err
-						}
-					}
-				}
-			case ellipses.HasEllipses(arg):
-				patterns, err := ellipses.FindEllipsesPatterns(arg)
-				if err != nil {
-					return layout, err
-				}
-				for _, exp := range patterns.Expand() {
-					if err := endpointsList.add(strings.Join(exp, "")); err != nil {
-						return layout, err
-					}
-				}
-			default:
-				if err := endpointsList.add(arg); err != nil {
-					return layout, err
-				}
-			}
-		}
-
-		var stopping bool
-		var singleNode bool
-		var eps []string
-
-		for i := 0; ; i++ {
-			for _, node := range endpointsList {
-				if node.nodeName == "" {
-					singleNode = true
-				}
-
-				if len(node.disks) <= i {
-					stopping = true
-					continue
-				}
-				if stopping {
-					return layout, errors.New("number of disks per node does not match")
-				}
-				eps = append(eps, node.disks[i])
-			}
-			if stopping {
-				break
-			}
-		}
-
-		for _, node := range endpointsList {
-			if node.nodeName != "" && singleNode {
-				return layout, errors.New("all arguments must but either single node or distributed")
-			}
-		}
-
-		setArgs, err := GetAllSets(list.setDriveCount, eps...)
-		if err != nil {
-			return layout, err
-		}
-
-		h := xxhash.New()
-		for _, s := range setArgs {
-			for _, d := range s {
-				h.WriteString(d)
-			}
-		}
-
-		layout.pools = append(layout.pools, poolDisksLayout{
-			cmdline: fmt.Sprintf("hash:%x", h.Sum(nil)),
-			layout:  setArgs,
-		})
-	}
-	return
-}
-
-// mergeDisksLayoutFromArgs supports with and without ellipses transparently.
-func mergeDisksLayoutFromArgs(args []string, ctxt *serverCtxt) (err error) {
-	if len(args) == 0 {
-		return errInvalidArgument
-	}
-
-	ok := true
-	for _, arg := range args {
-		ok = ok && !ellipses.HasEllipses(arg)
-	}
-
-	var setArgs [][]string
-
-	v, err := env.GetInt(EnvErasureSetDriveCount, 0)
-	if err != nil {
-		return err
-	}
-	setDriveCount := uint64(v)
-
-	// None of the args have ellipses use the old style.
-	if ok {
-		setArgs, err = GetAllSets(setDriveCount, args...)
-		if err != nil {
-			return err
-		}
-		ctxt.Layout = disksLayout{
-			legacy: true,
-			pools:  []poolDisksLayout{{layout: setArgs, cmdline: strings.Join(args, " ")}},
-		}
-		return
-	}
-
-	for _, arg := range args {
-		if !ellipses.HasEllipses(arg) && len(args) > 1 {
-			// TODO: support SNSD deployments to be decommissioned in future
-			return fmt.Errorf("all args must have ellipses for pool expansion (%w) args: %s", errInvalidArgument, args)
-		}
-		setArgs, err = GetAllSets(setDriveCount, arg)
-		if err != nil {
-			return err
-		}
-		ctxt.Layout.pools = append(ctxt.Layout.pools, poolDisksLayout{cmdline: arg, layout: setArgs})
-	}
-	return
-}
+var (
+	globalCustomErasureDriveCount = false
+)
 
 // CreateServerEndpoints - validates and creates new endpoints from input args, supports
 // both ellipses and without ellipses transparently.
-func createServerEndpoints(serverAddr string, poolArgs []poolDisksLayout, legacy bool) (
-	endpointServerPools EndpointServerPools, setupType SetupType, err error,
-) {
-	if len(poolArgs) == 0 {
+func createServerEndpoints(serverAddr string, args ...string) (
+	endpointServerPools EndpointServerPools, setupType SetupType, err error) {
+
+	if len(args) == 0 {
 		return nil, -1, errInvalidArgument
 	}
 
-	poolEndpoints, setupType, err := CreatePoolEndpoints(serverAddr, poolArgs...)
-	if err != nil {
-		return nil, -1, err
+	if !ellipses.HasEllipses(args...) {
+		setArgs, err := GetAllSets(args...)
+		if err != nil {
+			return nil, -1, err
+		}
+		endpointList, newSetupType, err := CreateEndpoints(serverAddr, false, setArgs...)
+		if err != nil {
+			return nil, -1, err
+		}
+		endpointServerPools = append(endpointServerPools, PoolEndpoints{
+			SetCount:     len(setArgs),
+			DrivesPerSet: len(setArgs[0]),
+			Endpoints:    endpointList,
+		})
+		setupType = newSetupType
+		return endpointServerPools, setupType, nil
 	}
 
-	for i, endpointList := range poolEndpoints {
+	var foundPrevLocal bool
+	for _, arg := range args {
+		setArgs, err := GetAllSets(arg)
+		if err != nil {
+			return nil, -1, err
+		}
+
+		endpointList, gotSetupType, err := CreateEndpoints(serverAddr, foundPrevLocal, setArgs...)
+		if err != nil {
+			return nil, -1, err
+		}
 		if err = endpointServerPools.Add(PoolEndpoints{
-			Legacy:       legacy,
-			SetCount:     len(poolArgs[i].layout),
-			DrivesPerSet: len(poolArgs[i].layout[0]),
+			SetCount:     len(setArgs),
+			DrivesPerSet: len(setArgs[0]),
 			Endpoints:    endpointList,
-			Platform:     fmt.Sprintf("OS: %s | Arch: %s", runtime.GOOS, runtime.GOARCH),
-			CmdLine:      poolArgs[i].cmdline,
 		}); err != nil {
 			return nil, -1, err
+		}
+		foundPrevLocal = endpointList.atleastOneEndpointLocal()
+		if setupType == UnknownSetupType {
+			setupType = gotSetupType
+		}
+		if setupType == ErasureSetupType && gotSetupType == DistErasureSetupType {
+			setupType = DistErasureSetupType
 		}
 	}
 

@@ -1,19 +1,18 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2016, 2017 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
@@ -21,21 +20,16 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
 	"testing"
 	"time"
 
-	"github.com/minio/minio/internal/auth"
-	"github.com/minio/pkg/v3/policy"
+	"github.com/minio/minio/pkg/auth"
+	iampolicy "github.com/minio/minio/pkg/iam/policy"
 )
-
-type nullReader struct{}
-
-func (r *nullReader) Read(b []byte) (int, error) {
-	return len(b), nil
-}
 
 // Test get request auth type.
 func TestGetRequestAuthType(t *testing.T) {
@@ -43,7 +37,6 @@ func TestGetRequestAuthType(t *testing.T) {
 		req   *http.Request
 		authT authType
 	}
-	nopCloser := io.NopCloser(io.LimitReader(&nullReader{}, 1024))
 	testCases := []testCase{
 		// Test case - 1
 		// Check for generic signature v4 header.
@@ -60,7 +53,6 @@ func TestGetRequestAuthType(t *testing.T) {
 					"Content-Encoding":     []string{streamingContentEncoding},
 				},
 				Method: http.MethodPut,
-				Body:   nopCloser,
 			},
 			authT: authTypeStreamingSigned,
 		},
@@ -120,7 +112,6 @@ func TestGetRequestAuthType(t *testing.T) {
 					"Content-Type": []string{"multipart/form-data"},
 				},
 				Method: http.MethodPost,
-				Body:   nopCloser,
 			},
 			authT: authTypePostPolicy,
 		},
@@ -228,7 +219,6 @@ func TestIsRequestPresignedSignatureV2(t *testing.T) {
 		q := inputReq.URL.Query()
 		q.Add(testCase.inputQueryKey, testCase.inputQueryValue)
 		inputReq.URL.RawQuery = q.Encode()
-		inputReq.ParseForm()
 
 		actualResult := isRequestPresignedSignatureV2(inputReq)
 		if testCase.expectedResult != actualResult {
@@ -237,7 +227,7 @@ func TestIsRequestPresignedSignatureV2(t *testing.T) {
 	}
 }
 
-// TestIsRequestPresignedSignatureV4 - Test validates the logic for presign signature version v4 detection.
+// TestIsRequestPresignedSignatureV4 - Test validates the logic for presign signature verision v4 detection.
 func TestIsRequestPresignedSignatureV4(t *testing.T) {
 	testCases := []struct {
 		inputQueryKey   string
@@ -263,7 +253,6 @@ func TestIsRequestPresignedSignatureV4(t *testing.T) {
 		q := inputReq.URL.Query()
 		q.Add(testCase.inputQueryKey, testCase.inputQueryValue)
 		inputReq.URL.RawQuery = q.Encode()
-		inputReq.ParseForm()
 
 		actualResult := isRequestPresignedSignatureV4(inputReq)
 		if testCase.expectedResult != actualResult {
@@ -287,7 +276,7 @@ func mustNewSignedRequest(method string, urlStr string, contentLength int64, bod
 	req := mustNewRequest(method, urlStr, contentLength, body, t)
 	cred := globalActiveCred
 	if err := signRequestV4(req, cred.AccessKey, cred.SecretKey); err != nil {
-		t.Fatalf("Unable to initialized new signed http request %s", err)
+		t.Fatalf("Unable to inititalized new signed http request %s", err)
 	}
 	return req
 }
@@ -298,7 +287,7 @@ func mustNewSignedV2Request(method string, urlStr string, contentLength int64, b
 	req := mustNewRequest(method, urlStr, contentLength, body, t)
 	cred := globalActiveCred
 	if err := signRequestV2(req, cred.AccessKey, cred.SecretKey); err != nil {
-		t.Fatalf("Unable to initialized new signed http request %s", err)
+		t.Fatalf("Unable to inititalized new signed http request %s", err)
 	}
 	return req
 }
@@ -309,7 +298,7 @@ func mustNewPresignedV2Request(method string, urlStr string, contentLength int64
 	req := mustNewRequest(method, urlStr, contentLength, body, t)
 	cred := globalActiveCred
 	if err := preSignV2(req, cred.AccessKey, cred.SecretKey, time.Now().Add(10*time.Minute).Unix()); err != nil {
-		t.Fatalf("Unable to initialized new signed http request %s", err)
+		t.Fatalf("Unable to inititalized new signed http request %s", err)
 	}
 	return req
 }
@@ -320,7 +309,7 @@ func mustNewPresignedRequest(method string, urlStr string, contentLength int64, 
 	req := mustNewRequest(method, urlStr, contentLength, body, t)
 	cred := globalActiveCred
 	if err := preSignV4(req, cred.AccessKey, cred.SecretKey, time.Now().Add(10*time.Minute).Unix()); err != nil {
-		t.Fatalf("Unable to initialized new signed http request %s", err)
+		t.Fatalf("Unable to inititalized new signed http request %s", err)
 	}
 	return req
 }
@@ -346,8 +335,7 @@ func mustNewSignedEmptyMD5Request(method string, urlStr string, contentLength in
 }
 
 func mustNewSignedBadMD5Request(method string, urlStr string, contentLength int64,
-	body io.ReadSeeker, t *testing.T,
-) *http.Request {
+	body io.ReadSeeker, t *testing.T) *http.Request {
 	req := mustNewRequest(method, urlStr, contentLength, body, t)
 	req.Header.Set("Content-Md5", "YWFhYWFhYWFhYWFhYWFhCg==")
 	cred := globalActiveCred
@@ -359,10 +347,7 @@ func mustNewSignedBadMD5Request(method string, urlStr string, contentLength int6
 
 // Tests is requested authenticated function, tests replies for s3 errors.
 func TestIsReqAuthenticated(t *testing.T) {
-	ctx, cancel := context.WithCancel(GlobalContext)
-	defer cancel()
-
-	objLayer, fsDir, err := prepareFS(ctx)
+	objLayer, fsDir, err := prepareFS()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,18 +356,12 @@ func TestIsReqAuthenticated(t *testing.T) {
 		t.Fatalf("unable initialize config file, %s", err)
 	}
 
-	initAllSubsystems(ctx)
-
-	initConfigSubsystem(ctx, objLayer)
-
 	creds, err := auth.CreateCredentials("myuser", "mypassword")
 	if err != nil {
 		t.Fatalf("unable create credential, %s", err)
 	}
 
 	globalActiveCred = creds
-
-	globalIAMSys.Init(ctx, objLayer, globalEtcdClient, 2*time.Second)
 
 	// List of test cases for validating http request authentication.
 	testCases := []struct {
@@ -401,11 +380,12 @@ func TestIsReqAuthenticated(t *testing.T) {
 		{mustNewSignedRequest(http.MethodGet, "http://127.0.0.1:9000", 0, nil, t), ErrNone},
 	}
 
+	ctx := context.Background()
 	// Validates all testcases.
 	for i, testCase := range testCases {
-		s3Error := isReqAuthenticated(ctx, testCase.req, globalSite.Region(), serviceS3)
+		s3Error := isReqAuthenticated(ctx, testCase.req, globalServerRegion, serviceS3)
 		if s3Error != testCase.s3Error {
-			if _, err := io.ReadAll(testCase.req.Body); toAPIErrorCode(ctx, err) != testCase.s3Error {
+			if _, err := ioutil.ReadAll(testCase.req.Body); toAPIErrorCode(ctx, err) != testCase.s3Error {
 				t.Fatalf("Test %d: Unexpected S3 error: want %d - got %d (got after reading request %s)", i, testCase.s3Error, s3Error, toAPIError(ctx, err).Code)
 			}
 		}
@@ -413,10 +393,7 @@ func TestIsReqAuthenticated(t *testing.T) {
 }
 
 func TestCheckAdminRequestAuthType(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	objLayer, fsDir, err := prepareFS(ctx)
+	objLayer, fsDir, err := prepareFS()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -442,18 +419,19 @@ func TestCheckAdminRequestAuthType(t *testing.T) {
 		{Request: mustNewPresignedV2Request(http.MethodGet, "http://127.0.0.1:9000", 0, nil, t), ErrCode: ErrAccessDenied},
 		{Request: mustNewPresignedRequest(http.MethodGet, "http://127.0.0.1:9000", 0, nil, t), ErrCode: ErrAccessDenied},
 	}
+	ctx := context.Background()
 	for i, testCase := range testCases {
-		if _, s3Error := checkAdminRequestAuth(ctx, testCase.Request, policy.AllAdminActions, globalSite.Region()); s3Error != testCase.ErrCode {
+		if _, s3Error := checkAdminRequestAuth(ctx, testCase.Request, iampolicy.AllAdminActions, globalServerRegion); s3Error != testCase.ErrCode {
 			t.Errorf("Test %d: Unexpected s3error returned wanted %d, got %d", i, testCase.ErrCode, s3Error)
 		}
 	}
 }
 
 func TestValidateAdminSignature(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
-	objLayer, fsDir, err := prepareFS(ctx)
+	ctx := context.Background()
+
+	objLayer, fsDir, err := prepareFS()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -463,17 +441,11 @@ func TestValidateAdminSignature(t *testing.T) {
 		t.Fatalf("unable initialize config file, %s", err)
 	}
 
-	initAllSubsystems(ctx)
-
-	initConfigSubsystem(ctx, objLayer)
-
 	creds, err := auth.CreateCredentials("admin", "mypassword")
 	if err != nil {
 		t.Fatalf("unable create credential, %s", err)
 	}
 	globalActiveCred = creds
-
-	globalIAMSys.Init(ctx, objLayer, globalEtcdClient, 2*time.Second)
 
 	testCases := []struct {
 		AccessKey string
@@ -491,9 +463,9 @@ func TestValidateAdminSignature(t *testing.T) {
 	for i, testCase := range testCases {
 		req := mustNewRequest(http.MethodGet, "http://localhost:9000/", 0, nil, t)
 		if err := signRequestV4(req, testCase.AccessKey, testCase.SecretKey); err != nil {
-			t.Fatalf("Unable to initialized new signed http request %s", err)
+			t.Fatalf("Unable to inititalized new signed http request %s", err)
 		}
-		_, _, s3Error := validateAdminSignature(ctx, req, globalMinioDefaultRegion)
+		_, _, _, s3Error := validateAdminSignature(ctx, req, globalMinioDefaultRegion)
 		if s3Error != testCase.ErrCode {
 			t.Errorf("Test %d: Unexpected s3error returned wanted %d, got %d", i+1, testCase.ErrCode, s3Error)
 		}

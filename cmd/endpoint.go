@@ -1,23 +1,24 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2017-2019 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -33,12 +34,12 @@ import (
 
 	"github.com/dustin/go-humanize"
 	"github.com/minio/minio-go/v7/pkg/set"
-	"github.com/minio/minio/internal/config"
-	"github.com/minio/minio/internal/logger"
-	"github.com/minio/minio/internal/mountinfo"
-	"github.com/minio/pkg/v3/env"
-	xnet "github.com/minio/pkg/v3/net"
-	"golang.org/x/exp/slices"
+	"github.com/minio/minio/cmd/config"
+	xhttp "github.com/minio/minio/cmd/http"
+	"github.com/minio/minio/cmd/logger"
+	"github.com/minio/minio/pkg/env"
+	"github.com/minio/minio/pkg/mountinfo"
+	xnet "github.com/minio/minio/pkg/net"
 )
 
 // EndpointType - enum for endpoint type.
@@ -59,30 +60,10 @@ type ProxyEndpoint struct {
 	Transport http.RoundTripper
 }
 
-// Node holds information about a node in this cluster
-type Node struct {
-	*url.URL
-	Pools    []int
-	IsLocal  bool
-	GridHost string
-}
-
 // Endpoint - any type of endpoint.
 type Endpoint struct {
 	*url.URL
 	IsLocal bool
-
-	PoolIdx, SetIdx, DiskIdx int
-}
-
-// Equal returns true if endpoint == ep
-func (endpoint Endpoint) Equal(ep Endpoint) bool {
-	if endpoint.IsLocal == ep.IsLocal && endpoint.PoolIdx == ep.PoolIdx && endpoint.SetIdx == ep.SetIdx && endpoint.DiskIdx == ep.DiskIdx {
-		if endpoint.Path == ep.Path && endpoint.Host == ep.Host {
-			return true
-		}
-	}
-	return false
 }
 
 func (endpoint Endpoint) String() string {
@@ -107,35 +88,15 @@ func (endpoint Endpoint) HTTPS() bool {
 	return endpoint.Scheme == "https"
 }
 
-// GridHost returns the host to be used for grid connections.
-func (endpoint Endpoint) GridHost() string {
-	return fmt.Sprintf("%s://%s", endpoint.Scheme, endpoint.Host)
-}
-
 // UpdateIsLocal - resolves the host and updates if it is local or not.
 func (endpoint *Endpoint) UpdateIsLocal() (err error) {
-	if endpoint.Host != "" {
+	if !endpoint.IsLocal {
 		endpoint.IsLocal, err = isLocalHost(endpoint.Hostname(), endpoint.Port(), globalMinioPort)
 		if err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-// SetPoolIndex sets a specific pool number to this node
-func (endpoint *Endpoint) SetPoolIndex(i int) {
-	endpoint.PoolIdx = i
-}
-
-// SetSetIndex sets a specific set number to this node
-func (endpoint *Endpoint) SetSetIndex(i int) {
-	endpoint.SetIdx = i
-}
-
-// SetDiskIndex sets a specific disk number to this node
-func (endpoint *Endpoint) SetDiskIndex(i int) {
-	endpoint.DiskIdx = i
 }
 
 // NewEndpoint - returns new endpoint based on given arguments.
@@ -232,75 +193,19 @@ func NewEndpoint(arg string) (ep Endpoint, e error) {
 	return Endpoint{
 		URL:     u,
 		IsLocal: isLocal,
-		PoolIdx: -1,
-		SetIdx:  -1,
-		DiskIdx: -1,
 	}, nil
 }
 
 // PoolEndpoints represent endpoints in a given pool
 // along with its setCount and setDriveCount.
 type PoolEndpoints struct {
-	// indicates if endpoints are provided in non-ellipses style
-	Legacy       bool
 	SetCount     int
 	DrivesPerSet int
 	Endpoints    Endpoints
-	CmdLine      string
-	Platform     string
 }
 
 // EndpointServerPools - list of list of endpoints
 type EndpointServerPools []PoolEndpoints
-
-// ESCount returns the total number of erasure sets in this cluster
-func (l EndpointServerPools) ESCount() (count int) {
-	for _, p := range l {
-		count += p.SetCount
-	}
-	return
-}
-
-// GetNodes returns a sorted list of nodes in this cluster
-func (l EndpointServerPools) GetNodes() (nodes []Node) {
-	nodesMap := make(map[string]Node)
-	for _, pool := range l {
-		for _, ep := range pool.Endpoints {
-			node, ok := nodesMap[ep.Host]
-			if !ok {
-				node.IsLocal = ep.IsLocal
-				node.URL = &url.URL{
-					Scheme: ep.Scheme,
-					Host:   ep.Host,
-				}
-				node.GridHost = ep.GridHost()
-			}
-			if !slices.Contains(node.Pools, ep.PoolIdx) {
-				node.Pools = append(node.Pools, ep.PoolIdx)
-			}
-			nodesMap[ep.Host] = node
-		}
-	}
-	nodes = make([]Node, 0, len(nodesMap))
-	for _, v := range nodesMap {
-		nodes = append(nodes, v)
-	}
-	sort.Slice(nodes, func(i, j int) bool {
-		return nodes[i].Host < nodes[j].Host
-	})
-	return
-}
-
-// GetPoolIdx return pool index
-func (l EndpointServerPools) GetPoolIdx(pool string) int {
-	for id, ep := range globalEndpoints {
-		if ep.CmdLine != pool {
-			continue
-		}
-		return id
-	}
-	return -1
-}
 
 // GetLocalPoolIdx returns the pool which endpoint belongs to locally.
 // if ep is remote this code will return -1 poolIndex
@@ -315,13 +220,6 @@ func (l EndpointServerPools) GetLocalPoolIdx(ep Endpoint) int {
 		}
 	}
 	return -1
-}
-
-// Legacy returns 'true' if the MinIO server commandline was
-// provided with no ellipses pattern, those are considered
-// legacy deployments.
-func (l EndpointServerPools) Legacy() bool {
-	return len(l) == 1 && l[0].Legacy
 }
 
 // Add add pool endpoints
@@ -346,7 +244,7 @@ func (l *EndpointServerPools) Add(zeps PoolEndpoints) error {
 func (l EndpointServerPools) Localhost() string {
 	for _, ep := range l {
 		for _, endpoint := range ep.Endpoints {
-			if endpoint.IsLocal && endpoint.Host != "" {
+			if endpoint.IsLocal {
 				u := &url.URL{
 					Scheme: endpoint.Scheme,
 					Host:   endpoint.Host,
@@ -355,37 +253,7 @@ func (l EndpointServerPools) Localhost() string {
 			}
 		}
 	}
-	host := globalMinioHost
-	if host == "" {
-		host = sortIPs(localIP4.ToSlice())[0]
-	}
-	return fmt.Sprintf("%s://%s", getURLScheme(globalIsTLS), net.JoinHostPort(host, globalMinioPort))
-}
-
-// LocalDisksPaths returns the disk paths of the local disks
-func (l EndpointServerPools) LocalDisksPaths() []string {
-	var disks []string
-	for _, ep := range l {
-		for _, endpoint := range ep.Endpoints {
-			if endpoint.IsLocal {
-				disks = append(disks, endpoint.Path)
-			}
-		}
-	}
-	return disks
-}
-
-// NLocalDisksPathsPerPool returns the disk paths of the local disks per pool
-func (l EndpointServerPools) NLocalDisksPathsPerPool() []int {
-	localDisksCount := make([]int, len(l))
-	for i, ep := range l {
-		for _, endpoint := range ep.Endpoints {
-			if endpoint.IsLocal {
-				localDisksCount[i]++
-			}
-		}
-	}
-	return localDisksCount
+	return ""
 }
 
 // FirstLocal returns true if the first endpoint is local.
@@ -398,101 +266,12 @@ func (l EndpointServerPools) HTTPS() bool {
 	return l[0].Endpoints.HTTPS()
 }
 
-// NEndpoints - returns number of endpoints
+// NEndpoints - returns all nodes count
 func (l EndpointServerPools) NEndpoints() (count int) {
 	for _, ep := range l {
 		count += len(ep.Endpoints)
 	}
 	return count
-}
-
-// GridHosts will return all peers, including local.
-// in websocket grid compatible format, The local peer
-// is returned as a separate string.
-func (l EndpointServerPools) GridHosts() (gridHosts []string, gridLocal string) {
-	seenHosts := set.NewStringSet()
-	for _, ep := range l {
-		for _, endpoint := range ep.Endpoints {
-			u := endpoint.GridHost()
-			if seenHosts.Contains(u) {
-				continue
-			}
-			seenHosts.Add(u)
-
-			// Set local endpoint
-			if endpoint.IsLocal {
-				gridLocal = u
-			}
-
-			gridHosts = append(gridHosts, u)
-		}
-	}
-
-	return gridHosts, gridLocal
-}
-
-// FindGridHostsFromPeerPool will return a matching peerPool from provided peer (as string)
-func (l EndpointServerPools) FindGridHostsFromPeerPool(peer string) []int {
-	if peer == "" {
-		return nil
-	}
-
-	var pools []int
-	for _, ep := range l {
-		for _, endpoint := range ep.Endpoints {
-			if endpoint.IsLocal {
-				continue
-			}
-
-			if !slices.Contains(pools, endpoint.PoolIdx) {
-				pools = append(pools, endpoint.PoolIdx)
-			}
-		}
-	}
-
-	return pools
-}
-
-// FindGridHostsFromPeerStr will return a matching peer from provided peer (as string)
-func (l EndpointServerPools) FindGridHostsFromPeerStr(peer string) (peerGrid string) {
-	if peer == "" {
-		return ""
-	}
-	for _, ep := range l {
-		for _, endpoint := range ep.Endpoints {
-			if endpoint.IsLocal {
-				continue
-			}
-
-			if endpoint.Host == peer {
-				return endpoint.GridHost()
-			}
-		}
-	}
-	return ""
-}
-
-// FindGridHostsFromPeer will return a matching peer from provided peer.
-func (l EndpointServerPools) FindGridHostsFromPeer(peer *xnet.Host) (peerGrid string) {
-	if peer == nil {
-		return ""
-	}
-	for _, ep := range l {
-		for _, endpoint := range ep.Endpoints {
-			if endpoint.IsLocal {
-				continue
-			}
-			host, err := xnet.ParseHost(endpoint.Host)
-			if err != nil {
-				continue
-			}
-
-			if host.String() == peer.String() {
-				return endpoint.GridHost()
-			}
-		}
-	}
-	return ""
 }
 
 // Hostnames - returns list of unique hostnames
@@ -522,7 +301,7 @@ func (l EndpointServerPools) hostsSorted() []*xnet.Host {
 		}
 		host, err := xnet.ParseHost(hostStr)
 		if err != nil {
-			internalLogIf(GlobalContext, err)
+			logger.LogIf(GlobalContext, err)
 			continue
 		}
 		hosts[i] = host
@@ -544,9 +323,7 @@ func (l EndpointServerPools) peers() (peers []string, local string) {
 			peer := endpoint.Host
 			if endpoint.IsLocal {
 				if _, port := mustSplitHostPort(peer); port == globalMinioPort {
-					if local == "" {
-						local = peer
-					}
+					local = peer
 				}
 			}
 
@@ -585,6 +362,13 @@ func (endpoints Endpoints) GetAllStrings() (all []string) {
 func hostResolveToLocalhost(endpoint Endpoint) bool {
 	hostIPs, err := getHostIP(endpoint.Hostname())
 	if err != nil {
+		// Log the message to console about the host resolving
+		reqInfo := (&logger.ReqInfo{}).AppendTags(
+			"host",
+			endpoint.Hostname(),
+		)
+		ctx := logger.SetReqInfo(GlobalContext, reqInfo)
+		logger.LogIf(ctx, err, logger.Application)
 		return false
 	}
 	var loopback int
@@ -596,21 +380,32 @@ func hostResolveToLocalhost(endpoint Endpoint) bool {
 	return loopback == len(hostIPs)
 }
 
+func (endpoints Endpoints) atleastOneEndpointLocal() bool {
+	for _, endpoint := range endpoints {
+		if endpoint.IsLocal {
+			return true
+		}
+	}
+	return false
+}
+
 // UpdateIsLocal - resolves the host and discovers the local host.
-func (endpoints Endpoints) UpdateIsLocal() error {
+func (endpoints Endpoints) UpdateIsLocal(foundPrevLocal bool) error {
+	orchestrated := IsDocker() || IsKubernetes()
+	k8sReplicaSet := IsKubernetesReplicaSet()
+
 	var epsResolved int
 	var foundLocal bool
 	resolvedList := make([]bool, len(endpoints))
 	// Mark the starting time
 	startTime := time.Now()
-	keepAliveTicker := time.NewTicker(500 * time.Millisecond)
+	keepAliveTicker := time.NewTicker(10 * time.Millisecond)
 	defer keepAliveTicker.Stop()
 	for {
 		// Break if the local endpoint is found already Or all the endpoints are resolved.
 		if foundLocal || (epsResolved == len(endpoints)) {
 			break
 		}
-
 		// Retry infinitely on Kubernetes and Docker swarm.
 		// This is needed as the remote hosts are sometime
 		// not available immediately.
@@ -624,39 +419,27 @@ func (endpoints Endpoints) UpdateIsLocal() error {
 					continue
 				}
 
-				if endpoints[i].Host == "" {
-					resolvedList[i] = true
-					endpoints[i].IsLocal = true
-					epsResolved++
-					if !foundLocal {
-						foundLocal = true
-					}
-					continue
-				}
-
 				// Log the message to console about the host resolving
 				reqInfo := (&logger.ReqInfo{}).AppendTags(
 					"host",
 					endpoints[i].Hostname(),
 				)
 
-				if orchestrated && hostResolveToLocalhost(endpoints[i]) {
+				if k8sReplicaSet && hostResolveToLocalhost(endpoints[i]) {
+					err := fmt.Errorf("host %s resolves to 127.*, DNS incorrectly configured retrying",
+						endpoints[i])
 					// time elapsed
 					timeElapsed := time.Since(startTime)
-					// log error only if more than a second has elapsed
+					// log error only if more than 1s elapsed
 					if timeElapsed > time.Second {
 						reqInfo.AppendTags("elapsedTime",
 							humanize.RelTime(startTime,
 								startTime.Add(timeElapsed),
 								"elapsed",
-								"",
-							))
-						ctx := logger.SetReqInfo(GlobalContext,
-							reqInfo)
-						bootLogOnceIf(ctx, fmt.Errorf("%s resolves to localhost in a containerized deployment, waiting for it to resolve to a valid IP",
-							endpoints[i].Hostname()), endpoints[i].Hostname(), logger.ErrorKind)
+								""))
+						ctx := logger.SetReqInfo(GlobalContext, reqInfo)
+						logger.LogIf(ctx, err, logger.Application)
 					}
-
 					continue
 				}
 
@@ -673,7 +456,7 @@ func (endpoints Endpoints) UpdateIsLocal() error {
 				if err != nil {
 					// time elapsed
 					timeElapsed := time.Since(startTime)
-					// log error only if more than a second has elapsed
+					// log error only if more than 1s elapsed
 					if timeElapsed > time.Second {
 						reqInfo.AppendTags("elapsedTime",
 							humanize.RelTime(startTime,
@@ -683,11 +466,41 @@ func (endpoints Endpoints) UpdateIsLocal() error {
 							))
 						ctx := logger.SetReqInfo(GlobalContext,
 							reqInfo)
-						bootLogOnceIf(ctx, err, endpoints[i].Hostname(), logger.ErrorKind)
+						logger.LogIf(ctx, err, logger.Application)
 					}
 				} else {
 					resolvedList[i] = true
 					endpoints[i].IsLocal = isLocal
+					if k8sReplicaSet && !endpoints.atleastOneEndpointLocal() && !foundPrevLocal {
+						// In replicated set in k8s deployment, IPs might
+						// get resolved for older IPs, add this code
+						// to ensure that we wait for this server to
+						// participate atleast one disk and be local.
+						//
+						// In special cases for replica set with expanded
+						// pool setups we need to make sure to provide
+						// value of foundPrevLocal from pool1 if we already
+						// found a local setup. Only if we haven't found
+						// previous local we continue to wait to look for
+						// atleast one local.
+						resolvedList[i] = false
+						// time elapsed
+						err := fmt.Errorf("no endpoint is local to this host: %s", endpoints[i])
+						timeElapsed := time.Since(startTime)
+						// log error only if more than 1s elapsed
+						if timeElapsed > time.Second {
+							reqInfo.AppendTags("elapsedTime",
+								humanize.RelTime(startTime,
+									startTime.Add(timeElapsed),
+									"elapsed",
+									"",
+								))
+							ctx := logger.SetReqInfo(GlobalContext,
+								reqInfo)
+							logger.LogIf(ctx, err, logger.Application)
+						}
+						continue
+					}
 					epsResolved++
 					if !foundLocal {
 						foundLocal = isLocal
@@ -739,7 +552,6 @@ func NewEndpoints(args ...string) (endpoints Endpoints, err error) {
 		}
 
 		// All endpoints have to be same type and scheme if applicable.
-		//nolint:gocritic
 		if i == 0 {
 			endpointType = endpoint.Type()
 			scheme = endpoint.Scheme
@@ -776,356 +588,163 @@ func checkCrossDeviceMounts(endpoints Endpoints) (err error) {
 	return mountinfo.CheckCrossDevice(absPaths)
 }
 
-// PoolEndpointList is a temporary type to holds the list of endpoints
-type PoolEndpointList []Endpoints
-
-// UpdateIsLocal - resolves all hosts and discovers which are local
-func (p PoolEndpointList) UpdateIsLocal() error {
-	var epsResolved int
-	var epCount int
-
-	for _, endpoints := range p {
-		epCount += len(endpoints)
-	}
-
-	var foundLocal bool
-	resolvedList := make(map[Endpoint]bool)
-
-	// Mark the starting time
-	startTime := time.Now()
-	keepAliveTicker := time.NewTicker(1 * time.Second)
-	defer keepAliveTicker.Stop()
-	for {
-		// Break if the local endpoint is found already Or all the endpoints are resolved.
-		if foundLocal || (epsResolved == epCount) {
-			break
-		}
-
-		// Retry infinitely on Kubernetes and Docker swarm.
-		// This is needed as the remote hosts are sometime
-		// not available immediately.
-		select {
-		case <-globalOSSignalCh:
-			return fmt.Errorf("The endpoint resolution got interrupted")
-		default:
-			for i, endpoints := range p {
-				for j, endpoint := range endpoints {
-					if resolvedList[endpoint] {
-						// Continue if host is already resolved.
-						continue
-					}
-
-					if endpoint.Host == "" || (orchestrated && env.Get("_MINIO_SERVER_LOCAL", "") == endpoint.Host) {
-						if !foundLocal {
-							foundLocal = true
-						}
-						endpoint.IsLocal = true
-						endpoints[j] = endpoint
-						epsResolved++
-						resolvedList[endpoint] = true
-						continue
-					}
-
-					// Log the message to console about the host resolving
-					reqInfo := (&logger.ReqInfo{}).AppendTags(
-						"host",
-						endpoint.Hostname(),
-					)
-
-					if orchestrated && hostResolveToLocalhost(endpoint) {
-						// time elapsed
-						timeElapsed := time.Since(startTime)
-						// log error only if more than a second has elapsed
-						if timeElapsed > time.Second {
-							reqInfo.AppendTags("elapsedTime",
-								humanize.RelTime(startTime,
-									startTime.Add(timeElapsed),
-									"elapsed",
-									"",
-								))
-							ctx := logger.SetReqInfo(GlobalContext,
-								reqInfo)
-							bootLogOnceIf(ctx, fmt.Errorf("%s resolves to localhost in a containerized deployment, waiting for it to resolve to a valid IP",
-								endpoint.Hostname()), endpoint.Hostname(), logger.ErrorKind)
-						}
-						continue
-					}
-
-					// return err if not Docker or Kubernetes
-					// We use IsDocker() to check for Docker environment
-					// We use IsKubernetes() to check for Kubernetes environment
-					isLocal, err := isLocalHost(endpoint.Hostname(),
-						endpoint.Port(),
-						globalMinioPort,
-					)
-					if err != nil && !orchestrated {
-						return err
-					}
-					if err != nil {
-						// time elapsed
-						timeElapsed := time.Since(startTime)
-						// log error only if more than a second has elapsed
-						if timeElapsed > time.Second {
-							reqInfo.AppendTags("elapsedTime",
-								humanize.RelTime(startTime,
-									startTime.Add(timeElapsed),
-									"elapsed",
-									"",
-								))
-							ctx := logger.SetReqInfo(GlobalContext,
-								reqInfo)
-							bootLogOnceIf(ctx, fmt.Errorf("Unable to resolve DNS for %s: %w", endpoint, err), endpoint.Hostname(), logger.ErrorKind)
-						}
-					} else {
-						resolvedList[endpoint] = true
-						endpoint.IsLocal = isLocal
-						epsResolved++
-						if !foundLocal {
-							foundLocal = isLocal
-						}
-						endpoints[j] = endpoint
-					}
-				}
-
-				p[i] = endpoints
-
-				// Wait for the tick, if the there exist a local endpoint in discovery.
-				// Non docker/kubernetes environment we do not need to wait.
-				if !foundLocal && orchestrated {
-					<-keepAliveTicker.C
-				}
-			}
-		}
-	}
-
-	// On Kubernetes/Docker setups DNS resolves inappropriately sometimes
-	// where there are situations same endpoints with multiple disks
-	// come online indicating either one of them is local and some
-	// of them are not local. This situation can never happen and
-	// its only a possibility in orchestrated deployments with dynamic
-	// DNS. Following code ensures that we treat if one of the endpoint
-	// says its local for a given host - it is true for all endpoints
-	// for the same host. Following code ensures that this assumption
-	// is true and it works in all scenarios and it is safe to assume
-	// for a given host.
-	for i, endpoints := range p {
-		endpointLocalMap := make(map[string]bool)
-		for _, ep := range endpoints {
-			if ep.IsLocal {
-				endpointLocalMap[ep.Host] = ep.IsLocal
-			}
-		}
-		for i := range endpoints {
-			endpoints[i].IsLocal = endpointLocalMap[endpoints[i].Host]
-		}
-		p[i] = endpoints
-	}
-
-	return nil
-}
-
-func isEmptyLayout(poolsLayout ...poolDisksLayout) bool {
-	return len(poolsLayout) == 0 || len(poolsLayout[0].layout) == 0 || len(poolsLayout[0].layout[0]) == 0 || len(poolsLayout[0].layout[0][0]) == 0
-}
-
-func isSingleDriveLayout(poolsLayout ...poolDisksLayout) bool {
-	return len(poolsLayout) == 1 && len(poolsLayout[0].layout) == 1 && len(poolsLayout[0].layout[0]) == 1
-}
-
-// CreatePoolEndpoints creates a list of endpoints per pool, resolves their relevant hostnames and
-// discovers those are local or remote.
-func CreatePoolEndpoints(serverAddr string, poolsLayout ...poolDisksLayout) ([]Endpoints, SetupType, error) {
+// CreateEndpoints - validates and creates new endpoints for given args.
+func CreateEndpoints(serverAddr string, foundLocal bool, args ...[]string) (Endpoints, SetupType, error) {
+	var endpoints Endpoints
 	var setupType SetupType
-
-	if isEmptyLayout(poolsLayout...) {
-		return nil, setupType, config.ErrInvalidErasureEndpoints(nil).Msg("invalid number of endpoints")
-	}
+	var err error
 
 	// Check whether serverAddr is valid for this host.
-	if err := CheckLocalServerAddr(serverAddr); err != nil {
-		return nil, setupType, err
+	if err = CheckLocalServerAddr(serverAddr); err != nil {
+		return endpoints, setupType, err
 	}
 
 	_, serverAddrPort := mustSplitHostPort(serverAddr)
 
-	poolEndpoints := make(PoolEndpointList, len(poolsLayout))
-
-	// For single arg, return single drive EC setup.
-	if isSingleDriveLayout(poolsLayout...) {
-		endpoint, err := NewEndpoint(poolsLayout[0].layout[0][0])
+	// For single arg, return FS setup.
+	if len(args) == 1 && len(args[0]) == 1 {
+		var endpoint Endpoint
+		endpoint, err = NewEndpoint(args[0][0])
 		if err != nil {
-			return nil, setupType, err
+			return endpoints, setupType, err
 		}
 		if err := endpoint.UpdateIsLocal(); err != nil {
-			return nil, setupType, err
+			return endpoints, setupType, err
 		}
 		if endpoint.Type() != PathEndpointType {
-			return nil, setupType, config.ErrInvalidEndpoint(nil).Msg("use path style endpoint for single node setup")
+			return endpoints, setupType, config.ErrInvalidFSEndpoint(nil).Msg("use path style endpoint for FS setup")
 		}
-
-		endpoint.SetPoolIndex(0)
-		endpoint.SetSetIndex(0)
-		endpoint.SetDiskIndex(0)
-
-		var endpoints Endpoints
 		endpoints = append(endpoints, endpoint)
-		setupType = ErasureSDSetupType
+		setupType = FSSetupType
 
-		poolEndpoints[0] = endpoints
 		// Check for cross device mounts if any.
 		if err = checkCrossDeviceMounts(endpoints); err != nil {
-			return nil, setupType, config.ErrInvalidEndpoint(nil).Msg(err.Error())
+			return endpoints, setupType, config.ErrInvalidFSEndpoint(nil).Msg(err.Error())
 		}
 
-		return poolEndpoints, setupType, nil
+		return endpoints, setupType, nil
+	}
+
+	for _, iargs := range args {
+		// Convert args to endpoints
+		eps, err := NewEndpoints(iargs...)
+		if err != nil {
+			return endpoints, setupType, config.ErrInvalidErasureEndpoints(nil).Msg(err.Error())
+		}
+
+		// Check for cross device mounts if any.
+		if err = checkCrossDeviceMounts(eps); err != nil {
+			return endpoints, setupType, config.ErrInvalidErasureEndpoints(nil).Msg(err.Error())
+		}
+
+		endpoints = append(endpoints, eps...)
+	}
+
+	if len(endpoints) == 0 {
+		return endpoints, setupType, config.ErrInvalidErasureEndpoints(nil).Msg("invalid number of endpoints")
+	}
+
+	// Return Erasure setup when all endpoints are path style.
+	if endpoints[0].Type() == PathEndpointType {
+		setupType = ErasureSetupType
+		return endpoints, setupType, nil
+	}
+
+	if err = endpoints.UpdateIsLocal(foundLocal); err != nil {
+		return endpoints, setupType, config.ErrInvalidErasureEndpoints(nil).Msg(err.Error())
+	}
+
+	// Here all endpoints are URL style.
+	endpointPathSet := set.NewStringSet()
+	localEndpointCount := 0
+	localServerHostSet := set.NewStringSet()
+	localPortSet := set.NewStringSet()
+
+	for _, endpoint := range endpoints {
+		endpointPathSet.Add(endpoint.Path)
+		if endpoint.IsLocal {
+			localServerHostSet.Add(endpoint.Hostname())
+
+			var port string
+			_, port, err = net.SplitHostPort(endpoint.Host)
+			if err != nil {
+				port = serverAddrPort
+			}
+			localPortSet.Add(port)
+
+			localEndpointCount++
+		}
+	}
+
+	// Check whether same path is not used in endpoints of a host on different port.
+	{
+		pathIPMap := make(map[string]set.StringSet)
+		for _, endpoint := range endpoints {
+			host := endpoint.Hostname()
+			hostIPSet, _ := getHostIP(host)
+			if IPSet, ok := pathIPMap[endpoint.Path]; ok {
+				if !IPSet.Intersection(hostIPSet).IsEmpty() {
+					return endpoints, setupType,
+						config.ErrInvalidErasureEndpoints(nil).Msg(fmt.Sprintf("path '%s' can not be served by different port on same address", endpoint.Path))
+				}
+				pathIPMap[endpoint.Path] = IPSet.Union(hostIPSet)
+			} else {
+				pathIPMap[endpoint.Path] = hostIPSet
+			}
+		}
+	}
+
+	// Check whether same path is used for more than 1 local endpoints.
+	{
+		localPathSet := set.CreateStringSet()
+		for _, endpoint := range endpoints {
+			if !endpoint.IsLocal {
+				continue
+			}
+			if localPathSet.Contains(endpoint.Path) {
+				return endpoints, setupType,
+					config.ErrInvalidErasureEndpoints(nil).Msg(fmt.Sprintf("path '%s' cannot be served by different address on same server", endpoint.Path))
+			}
+			localPathSet.Add(endpoint.Path)
+		}
+	}
+
+	// All endpoints are pointing to local host
+	if len(endpoints) == localEndpointCount {
+		// If all endpoints have same port number, Just treat it as local erasure setup
+		// using URL style endpoints.
+		if len(localPortSet) == 1 {
+			if len(localServerHostSet) > 1 {
+				return endpoints, setupType,
+					config.ErrInvalidErasureEndpoints(nil).Msg("all local endpoints should not have different hostnames/ips")
+			}
+			return endpoints, ErasureSetupType, nil
+		}
+
+		// Even though all endpoints are local, but those endpoints use different ports.
+		// This means it is DistErasure setup.
+	}
+
+	// Add missing port in all endpoints.
+	for i := range endpoints {
+		_, port, err := net.SplitHostPort(endpoints[i].Host)
+		if err != nil {
+			endpoints[i].Host = net.JoinHostPort(endpoints[i].Host, serverAddrPort)
+		} else if endpoints[i].IsLocal && serverAddrPort != port {
+			// If endpoint is local, but port is different than serverAddrPort, then make it as remote.
+			endpoints[i].IsLocal = false
+		}
 	}
 
 	uniqueArgs := set.NewStringSet()
-
-	for poolIdx, pool := range poolsLayout {
-		var endpoints Endpoints
-		for setIdx, setLayout := range pool.layout {
-			// Convert args to endpoints
-			eps, err := NewEndpoints(setLayout...)
-			if err != nil {
-				return nil, setupType, config.ErrInvalidErasureEndpoints(nil).Msg(err.Error())
-			}
-
-			// Check for cross device mounts if any.
-			if err = checkCrossDeviceMounts(eps); err != nil {
-				return nil, setupType, config.ErrInvalidErasureEndpoints(nil).Msg(err.Error())
-			}
-
-			for diskIdx := range eps {
-				eps[diskIdx].SetPoolIndex(poolIdx)
-				eps[diskIdx].SetSetIndex(setIdx)
-				eps[diskIdx].SetDiskIndex(diskIdx)
-			}
-
-			endpoints = append(endpoints, eps...)
-		}
-
-		if len(endpoints) == 0 {
-			return nil, setupType, config.ErrInvalidErasureEndpoints(nil).Msg("invalid number of endpoints")
-		}
-
-		poolEndpoints[poolIdx] = endpoints
+	for _, endpoint := range endpoints {
+		uniqueArgs.Add(endpoint.Host)
 	}
 
-	if err := poolEndpoints.UpdateIsLocal(); err != nil {
-		return nil, setupType, config.ErrInvalidErasureEndpoints(nil).Msg(err.Error())
-	}
-
-	for i, endpoints := range poolEndpoints {
-		// Here all endpoints are URL style.
-		endpointPathSet := set.NewStringSet()
-		localEndpointCount := 0
-		localServerHostSet := set.NewStringSet()
-		localPortSet := set.NewStringSet()
-
-		for _, endpoint := range endpoints {
-			endpointPathSet.Add(endpoint.Path)
-			if endpoint.IsLocal && endpoint.Host != "" {
-				localServerHostSet.Add(endpoint.Hostname())
-
-				_, port, err := net.SplitHostPort(endpoint.Host)
-				if err != nil {
-					port = serverAddrPort
-				}
-				localPortSet.Add(port)
-
-				localEndpointCount++
-			}
-		}
-
-		reverseProxy := (env.Get("_MINIO_REVERSE_PROXY", "") != "") && ((env.Get("MINIO_CI_CD", "") != "") || (env.Get("CI", "") != ""))
-		// If not orchestrated
-		// and not setup in reverse proxy
-		if !orchestrated && !reverseProxy {
-			// Check whether same path is not used in endpoints of a host on different port.
-			// Only verify this on baremetal setups, DNS is not available in orchestrated
-			// environments so we can't do much here.
-			pathIPMap := make(map[string]set.StringSet)
-			hostIPCache := make(map[string]set.StringSet)
-			for _, endpoint := range endpoints {
-				host := endpoint.Hostname()
-				var hostIPSet set.StringSet
-				if host != "" {
-					var ok bool
-					hostIPSet, ok = hostIPCache[host]
-					if !ok {
-						var err error
-						hostIPSet, err = getHostIP(host)
-						if err != nil {
-							return nil, setupType, config.ErrInvalidErasureEndpoints(nil).Msg(fmt.Sprintf("host '%s' cannot resolve: %s", host, err))
-						}
-						hostIPCache[host] = hostIPSet
-					}
-				}
-				if IPSet, ok := pathIPMap[endpoint.Path]; ok {
-					if !IPSet.Intersection(hostIPSet).IsEmpty() {
-						return nil, setupType,
-							config.ErrInvalidErasureEndpoints(nil).Msg(fmt.Sprintf("same path '%s' can not be served by different port on same address", endpoint.Path))
-					}
-					pathIPMap[endpoint.Path] = IPSet.Union(hostIPSet)
-				} else {
-					pathIPMap[endpoint.Path] = hostIPSet
-				}
-			}
-		}
-
-		// Check whether same path is used for more than 1 local endpoints.
-		{
-			localPathSet := set.CreateStringSet()
-			for _, endpoint := range endpoints {
-				if !endpoint.IsLocal {
-					continue
-				}
-				if localPathSet.Contains(endpoint.Path) {
-					return nil, setupType,
-						config.ErrInvalidErasureEndpoints(nil).Msg(fmt.Sprintf("path '%s' cannot be served by different address on same server", endpoint.Path))
-				}
-				localPathSet.Add(endpoint.Path)
-			}
-		}
-
-		// Add missing port in all endpoints.
-		for i := range endpoints {
-			if endpoints[i].Host != "" {
-				_, port, err := net.SplitHostPort(endpoints[i].Host)
-				if err != nil {
-					endpoints[i].Host = net.JoinHostPort(endpoints[i].Host, serverAddrPort)
-				} else if endpoints[i].IsLocal && serverAddrPort != port {
-					// If endpoint is local, but port is different than serverAddrPort, then make it as remote.
-					endpoints[i].IsLocal = false
-				}
-			}
-		}
-
-		// All endpoints are pointing to local host
-		if len(endpoints) == localEndpointCount {
-			// If all endpoints have same port number, Just treat it as local erasure setup
-			// using URL style endpoints.
-			if len(localPortSet) == 1 {
-				if len(localServerHostSet) > 1 {
-					return nil, setupType,
-						config.ErrInvalidErasureEndpoints(nil).Msg("all local endpoints should not have different hostnames/ips")
-				}
-			}
-
-			// Even though all endpoints are local, but those endpoints use different ports.
-			// This means it is DistErasure setup.
-		}
-
-		for _, endpoint := range endpoints {
-			if endpoint.Host != "" {
-				uniqueArgs.Add(endpoint.Host)
-			} else {
-				uniqueArgs.Add(net.JoinHostPort("localhost", serverAddrPort))
-			}
-		}
-
-		poolEndpoints[i] = endpoints
+	// Error out if we have less than 2 unique servers.
+	if len(uniqueArgs.ToSlice()) < 2 && setupType == DistErasureSetupType {
+		err := fmt.Errorf("Unsupported number of endpoints (%s), minimum number of servers cannot be less than 2 in distributed setup", endpoints)
+		return endpoints, setupType, err
 	}
 
 	publicIPs := env.Get(config.EnvPublicIPs, "")
@@ -1133,25 +752,8 @@ func CreatePoolEndpoints(serverAddr string, poolsLayout ...poolDisksLayout) ([]E
 		updateDomainIPs(uniqueArgs)
 	}
 
-	erasureType := len(uniqueArgs.ToSlice()) == 1
-
-	for _, endpoints := range poolEndpoints {
-		// Return Erasure setup when all endpoints are path style.
-		if endpoints[0].Type() == PathEndpointType {
-			setupType = ErasureSetupType
-			break
-		}
-		if endpoints[0].Type() == URLEndpointType {
-			if erasureType {
-				setupType = ErasureSetupType
-			} else {
-				setupType = DistErasureSetupType
-			}
-			break
-		}
-	}
-
-	return poolEndpoints, setupType, nil
+	setupType = DistErasureSetupType
+	return endpoints, setupType, nil
 }
 
 // GetLocalPeer - returns local peer value, returns globalMinioAddr
@@ -1193,6 +795,72 @@ func GetProxyEndpointLocalIndex(proxyEps []ProxyEndpoint) int {
 	return -1
 }
 
+func httpDo(clnt *http.Client, req *http.Request, f func(*http.Response, error) error) error {
+	ctx, cancel := context.WithTimeout(GlobalContext, 200*time.Millisecond)
+	defer cancel()
+
+	// Run the HTTP request in a goroutine and pass the response to f.
+	c := make(chan error, 1)
+	req = req.WithContext(ctx)
+	go func() { c <- f(clnt.Do(req)) }()
+	select {
+	case <-ctx.Done():
+		<-c // Wait for f to return.
+		return ctx.Err()
+	case err := <-c:
+		return err
+	}
+}
+
+func getOnlineProxyEndpointIdx() int {
+	type reqIndex struct {
+		Request *http.Request
+		Idx     int
+	}
+
+	proxyRequests := make(map[*http.Client]reqIndex, len(globalProxyEndpoints))
+	for i, proxyEp := range globalProxyEndpoints {
+		proxyEp := proxyEp
+		serverURL := &url.URL{
+			Scheme: proxyEp.Scheme,
+			Host:   proxyEp.Host,
+			Path:   pathJoin(healthCheckPathPrefix, healthCheckLivenessPath),
+		}
+
+		req, err := http.NewRequest(http.MethodGet, serverURL.String(), nil)
+		if err != nil {
+			continue
+		}
+
+		proxyRequests[&http.Client{
+			Transport: proxyEp.Transport,
+		}] = reqIndex{
+			Request: req,
+			Idx:     i,
+		}
+	}
+
+	for c, r := range proxyRequests {
+		if err := httpDo(c, r.Request, func(resp *http.Response, err error) error {
+			if err != nil {
+				return err
+			}
+			xhttp.DrainBody(resp.Body)
+			if resp.StatusCode != http.StatusOK {
+				return errors.New(resp.Status)
+			}
+			if v := resp.Header.Get(xhttp.MinIOServerStatus); v == unavailable {
+				return errors.New(v)
+			}
+			return nil
+		}); err != nil {
+			continue
+		}
+		return r.Idx
+	}
+	return -1
+}
+
 // GetProxyEndpoints - get all endpoints that can be used to proxy list request.
 func GetProxyEndpoints(endpointServerPools EndpointServerPools) []ProxyEndpoint {
 	var proxyEps []ProxyEndpoint
@@ -1213,7 +881,7 @@ func GetProxyEndpoints(endpointServerPools EndpointServerPools) []ProxyEndpoint 
 
 			proxyEps = append(proxyEps, ProxyEndpoint{
 				Endpoint:  endpoint,
-				Transport: globalRemoteTargetTransport,
+				Transport: globalProxyTransport,
 			})
 		}
 	}

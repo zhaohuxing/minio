@@ -1,19 +1,18 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2015, 2016, 2017 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
@@ -29,10 +28,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/minio/minio-go/v7/pkg/encrypt"
+	"github.com/bcicen/jstream"
 	"github.com/minio/minio-go/v7/pkg/set"
-	xhttp "github.com/minio/minio/internal/http"
-	"github.com/minio/minio/internal/s3select/jstream"
 )
 
 // startWithConds - map which indicates if a given condition supports starts-with policy operator
@@ -47,22 +44,10 @@ var startsWithConds = map[string]bool{
 	"$key":                     true,
 	"$success_action_redirect": true,
 	"$redirect":                true,
-	"$success_action_status":   true,
+	"$success_action_status":   false,
 	"$x-amz-algorithm":         false,
 	"$x-amz-credential":        false,
 	"$x-amz-date":              false,
-}
-
-var postPolicyIgnoreKeys = map[string]bool{
-	"Policy":              true,
-	xhttp.AmzSignature:    true,
-	xhttp.ContentEncoding: true,
-	http.CanonicalHeaderKey(xhttp.AmzChecksumAlgo):   true,
-	http.CanonicalHeaderKey(xhttp.AmzChecksumCRC32):  true,
-	http.CanonicalHeaderKey(xhttp.AmzChecksumCRC32C): true,
-	http.CanonicalHeaderKey(xhttp.AmzChecksumSHA1):   true,
-	http.CanonicalHeaderKey(xhttp.AmzChecksumSHA256): true,
-	http.CanonicalHeaderKey(xhttp.AmzChecksumMode):   true,
 }
 
 // Add policy conditionals.
@@ -140,7 +125,7 @@ type PostPolicyForm struct {
 func sanitizePolicy(r io.Reader) (io.Reader, error) {
 	var buf bytes.Buffer
 	e := json.NewEncoder(&buf)
-	d := jstream.NewDecoder(r, 0).ObjectAsKVS().MaxDepth(10)
+	d := jstream.NewDecoder(r, 0).ObjectAsKVS()
 	sset := set.NewStringSet()
 	for mv := range d.Stream() {
 		var kvs jstream.KVS
@@ -232,19 +217,19 @@ func parsePostPolicyForm(r io.Reader) (PostPolicyForm, error) {
 					operator, matchType, value,
 				})
 			case policyCondContentLength:
-				minLen, err := toInteger(condt[1])
+				min, err := toInteger(condt[1])
 				if err != nil {
 					return parsedPolicy, err
 				}
 
-				maxLen, err := toInteger(condt[2])
+				max, err := toInteger(condt[2])
 				if err != nil {
 					return parsedPolicy, err
 				}
 
 				parsedPolicy.Conditions.ContentLengthRange = contentLengthRange{
-					Min:   minLen,
-					Max:   maxLen,
+					Min:   min,
+					Max:   max,
 					Valid: true,
 				}
 			default:
@@ -260,7 +245,7 @@ func parsePostPolicyForm(r io.Reader) (PostPolicyForm, error) {
 	return parsedPolicy, nil
 }
 
-// checkPolicyCond returns a boolean to indicate if a condition is satisfied according
+// checkPolicyCond returns a boolean to indicate if a condition is satisified according
 // to the passed operator
 func checkPolicyCond(op string, input1, input2 string) bool {
 	switch op {
@@ -278,22 +263,6 @@ func checkPostPolicy(formValues http.Header, postPolicyForm PostPolicyForm) erro
 	// Check if policy document expiry date is still not reached
 	if !postPolicyForm.Expiration.After(UTCNow()) {
 		return fmt.Errorf("Invalid according to Policy: Policy expired")
-	}
-	// check all formValues appear in postPolicyForm or return error. #https://github.com/minio/minio/issues/17391
-	checkHeader := map[string][]string{}
-	ignoreKeys := map[string]bool{}
-	for key, value := range formValues {
-		switch {
-		case ignoreKeys[key], postPolicyIgnoreKeys[key], strings.HasPrefix(key, encrypt.SseGenericHeader):
-			continue
-		case strings.HasPrefix(key, "X-Amz-Ignore-"):
-			ignoreKey := strings.Replace(key, "X-Amz-Ignore-", "", 1)
-			ignoreKeys[ignoreKey] = true
-			// if it have already
-			delete(checkHeader, ignoreKey)
-		default:
-			checkHeader[key] = value
-		}
 	}
 	// map to store the metadata
 	metaMap := make(map[string]string)
@@ -322,10 +291,6 @@ func checkPostPolicy(formValues http.Header, postPolicyForm PostPolicyForm) erro
 		formCanonicalName := http.CanonicalHeaderKey(strings.TrimPrefix(policy.Key, "$"))
 		// Operator for the current policy condition
 		op := policy.Operator
-		// Multiple values should not occur
-		if len(checkHeader[formCanonicalName]) >= 2 {
-			return fmt.Errorf("Invalid according to Policy: Policy Condition failed: [%s, %s, %s]. FormValues have multiple values: [%s]", op, policy.Key, policy.Value, strings.Join(checkHeader[formCanonicalName], ", "))
-		}
 		// If the current policy condition is known
 		if startsWithSupported, condFound := startsWithConds[policy.Key]; condFound {
 			// Check if the current condition supports starts-with operator
@@ -337,34 +302,16 @@ func checkPostPolicy(formValues http.Header, postPolicyForm PostPolicyForm) erro
 			if !condPassed {
 				return fmt.Errorf("Invalid according to Policy: Policy Condition failed")
 			}
-		} else if strings.HasPrefix(policy.Key, "$x-amz-meta-") || strings.HasPrefix(policy.Key, "$x-amz-") {
+		} else {
 			// This covers all conditions X-Amz-Meta-* and X-Amz-*
-			// Check if policy condition is satisfied
-			condPassed = checkPolicyCond(op, formValues.Get(formCanonicalName), policy.Value)
-			if !condPassed {
-				return fmt.Errorf("Invalid according to Policy: Policy Condition failed: [%s, %s, %s]", op, policy.Key, policy.Value)
+			if strings.HasPrefix(policy.Key, "$x-amz-meta-") || strings.HasPrefix(policy.Key, "$x-amz-") {
+				// Check if policy condition is satisfied
+				condPassed = checkPolicyCond(op, formValues.Get(formCanonicalName), policy.Value)
+				if !condPassed {
+					return fmt.Errorf("Invalid according to Policy: Policy Condition failed: [%s, %s, %s]", op, policy.Key, policy.Value)
+				}
 			}
 		}
-		delete(checkHeader, formCanonicalName)
-	}
-	// For SignV2 - Signature/AWSAccessKeyId field will be ignored.
-	if _, ok := formValues[xhttp.AmzSignatureV2]; ok {
-		delete(checkHeader, xhttp.AmzSignatureV2)
-		for k := range checkHeader {
-			// case-insensitivity for AWSAccessKeyId
-			if strings.EqualFold(k, xhttp.AmzAccessKeyID) {
-				delete(checkHeader, k)
-				break
-			}
-		}
-	}
-
-	if len(checkHeader) != 0 {
-		logKeys := make([]string, 0, len(checkHeader))
-		for key := range checkHeader {
-			logKeys = append(logKeys, key)
-		}
-		return fmt.Errorf("Each form field that you specify in a form must appear in the list of policy conditions. %q not specified in the policy.", strings.Join(logKeys, ", "))
 	}
 
 	return nil

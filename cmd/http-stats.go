@@ -1,19 +1,18 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2017 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
@@ -23,280 +22,73 @@ import (
 	"sync"
 	"sync/atomic"
 
-	xhttp "github.com/minio/minio/internal/http"
+	"github.com/minio/minio/cmd/logger"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// connStats - Network statistics
+// ConnStats - Network statistics
 // Count total input/output transferred bytes during
 // the server's life.
-type connStats struct {
-	internodeInputBytes  uint64
-	internodeOutputBytes uint64
-	s3InputBytes         uint64
-	s3OutputBytes        uint64
+type ConnStats struct {
+	totalInputBytes  uint64
+	totalOutputBytes uint64
+	s3InputBytes     uint64
+	s3OutputBytes    uint64
 }
 
-// Increase internode total input bytes
-func (s *connStats) incInternodeInputBytes(n int64) {
-	atomic.AddUint64(&s.internodeInputBytes, uint64(n))
+// Increase total input bytes
+func (s *ConnStats) incInputBytes(n int) {
+	atomic.AddUint64(&s.totalInputBytes, uint64(n))
 }
 
-// Increase internode total output bytes
-func (s *connStats) incInternodeOutputBytes(n int64) {
-	atomic.AddUint64(&s.internodeOutputBytes, uint64(n))
+// Increase total output bytes
+func (s *ConnStats) incOutputBytes(n int) {
+	atomic.AddUint64(&s.totalOutputBytes, uint64(n))
 }
 
-// Return internode total input bytes
-func (s *connStats) getInternodeInputBytes() uint64 {
-	return atomic.LoadUint64(&s.internodeInputBytes)
+// Return total input bytes
+func (s *ConnStats) getTotalInputBytes() uint64 {
+	return atomic.LoadUint64(&s.totalInputBytes)
 }
 
 // Return total output bytes
-func (s *connStats) getInternodeOutputBytes() uint64 {
-	return atomic.LoadUint64(&s.internodeOutputBytes)
+func (s *ConnStats) getTotalOutputBytes() uint64 {
+	return atomic.LoadUint64(&s.totalOutputBytes)
 }
 
-// Increase S3 total input bytes
-func (s *connStats) incS3InputBytes(n int64) {
+// Increase outbound input bytes
+func (s *ConnStats) incS3InputBytes(n int) {
 	atomic.AddUint64(&s.s3InputBytes, uint64(n))
 }
 
-// Increase S3 total output bytes
-func (s *connStats) incS3OutputBytes(n int64) {
+// Increase outbound output bytes
+func (s *ConnStats) incS3OutputBytes(n int) {
 	atomic.AddUint64(&s.s3OutputBytes, uint64(n))
 }
 
-// Return S3 total input bytes
-func (s *connStats) getS3InputBytes() uint64 {
+// Return outbound input bytes
+func (s *ConnStats) getS3InputBytes() uint64 {
 	return atomic.LoadUint64(&s.s3InputBytes)
 }
 
-// Return S3 total output bytes
-func (s *connStats) getS3OutputBytes() uint64 {
+// Return outbound output bytes
+func (s *ConnStats) getS3OutputBytes() uint64 {
 	return atomic.LoadUint64(&s.s3OutputBytes)
 }
 
 // Return connection stats (total input/output bytes and total s3 input/output bytes)
-func (s *connStats) toServerConnStats() serverConnStats {
-	return serverConnStats{
-		internodeInputBytes:  s.getInternodeInputBytes(),  // Traffic internode received
-		internodeOutputBytes: s.getInternodeOutputBytes(), // Traffic internode sent
-		s3InputBytes:         s.getS3InputBytes(),         // Traffic S3 received
-		s3OutputBytes:        s.getS3OutputBytes(),        // Traffic S3 sent
+func (s *ConnStats) toServerConnStats() ServerConnStats {
+	return ServerConnStats{
+		TotalInputBytes:  s.getTotalInputBytes(),  // Traffic including reserved bucket
+		TotalOutputBytes: s.getTotalOutputBytes(), // Traffic including reserved bucket
+		S3InputBytes:     s.getS3InputBytes(),     // Traffic for client buckets
+		S3OutputBytes:    s.getS3OutputBytes(),    // Traffic for client buckets
 	}
 }
 
 // Prepare new ConnStats structure
-func newConnStats() *connStats {
-	return &connStats{}
-}
-
-type bucketS3RXTX struct {
-	s3InputBytes  uint64
-	s3OutputBytes uint64
-}
-
-type bucketHTTPAPIStats struct {
-	currentS3Requests *HTTPAPIStats
-	totalS3Requests   *HTTPAPIStats
-	totalS34xxErrors  *HTTPAPIStats
-	totalS35xxErrors  *HTTPAPIStats
-	totalS3Canceled   *HTTPAPIStats
-}
-
-type bucketHTTPStats struct {
-	sync.RWMutex
-	httpStats map[string]bucketHTTPAPIStats
-}
-
-func newBucketHTTPStats() *bucketHTTPStats {
-	return &bucketHTTPStats{
-		httpStats: make(map[string]bucketHTTPAPIStats),
-	}
-}
-
-func (bh *bucketHTTPStats) delete(bucket string) {
-	bh.Lock()
-	defer bh.Unlock()
-
-	delete(bh.httpStats, bucket)
-}
-
-func (bh *bucketHTTPStats) updateHTTPStats(bucket, api string, w *xhttp.ResponseRecorder) {
-	if bh == nil {
-		return
-	}
-
-	if w != nil {
-		// Increment the prometheus http request response histogram with API, Bucket
-		bucketHTTPRequestsDuration.With(prometheus.Labels{
-			"api":    api,
-			"bucket": bucket,
-		}).Observe(w.TTFB().Seconds())
-	}
-
-	bh.Lock()
-	defer bh.Unlock()
-
-	hstats, ok := bh.httpStats[bucket]
-	if !ok {
-		hstats = bucketHTTPAPIStats{
-			currentS3Requests: &HTTPAPIStats{},
-			totalS3Requests:   &HTTPAPIStats{},
-			totalS3Canceled:   &HTTPAPIStats{},
-			totalS34xxErrors:  &HTTPAPIStats{},
-			totalS35xxErrors:  &HTTPAPIStats{},
-		}
-	}
-
-	if w == nil { // when response recorder nil, this is an active request
-		hstats.currentS3Requests.Inc(api)
-		bh.httpStats[bucket] = hstats
-		return
-	} // else {
-	hstats.currentS3Requests.Dec(api) // decrement this once we have the response recorder.
-
-	hstats.totalS3Requests.Inc(api)
-	code := w.StatusCode
-
-	switch {
-	case code == 0:
-	case code == 499:
-		// 499 is a good error, shall be counted as canceled.
-		hstats.totalS3Canceled.Inc(api)
-	case code >= http.StatusBadRequest:
-		if code >= http.StatusInternalServerError {
-			hstats.totalS35xxErrors.Inc(api)
-		} else {
-			hstats.totalS34xxErrors.Inc(api)
-		}
-	}
-
-	bh.httpStats[bucket] = hstats
-}
-
-func (bh *bucketHTTPStats) load(bucket string) bucketHTTPAPIStats {
-	if bh == nil {
-		return bucketHTTPAPIStats{
-			currentS3Requests: &HTTPAPIStats{},
-			totalS3Requests:   &HTTPAPIStats{},
-			totalS3Canceled:   &HTTPAPIStats{},
-			totalS34xxErrors:  &HTTPAPIStats{},
-			totalS35xxErrors:  &HTTPAPIStats{},
-		}
-	}
-
-	bh.RLock()
-	defer bh.RUnlock()
-
-	val, ok := bh.httpStats[bucket]
-	if ok {
-		return val
-	}
-
-	return bucketHTTPAPIStats{
-		currentS3Requests: &HTTPAPIStats{},
-		totalS3Requests:   &HTTPAPIStats{},
-		totalS3Canceled:   &HTTPAPIStats{},
-		totalS34xxErrors:  &HTTPAPIStats{},
-		totalS35xxErrors:  &HTTPAPIStats{},
-	}
-}
-
-type bucketConnStats struct {
-	sync.RWMutex
-	stats map[string]*bucketS3RXTX
-}
-
-func newBucketConnStats() *bucketConnStats {
-	return &bucketConnStats{
-		stats: make(map[string]*bucketS3RXTX),
-	}
-}
-
-// Increase S3 total input bytes for input bucket
-func (s *bucketConnStats) incS3InputBytes(bucket string, n int64) {
-	s.Lock()
-	defer s.Unlock()
-	stats, ok := s.stats[bucket]
-	if !ok {
-		stats = &bucketS3RXTX{
-			s3InputBytes: uint64(n),
-		}
-	} else {
-		stats.s3InputBytes += uint64(n)
-	}
-	s.stats[bucket] = stats
-}
-
-// Increase S3 total output bytes for input bucket
-func (s *bucketConnStats) incS3OutputBytes(bucket string, n int64) {
-	s.Lock()
-	defer s.Unlock()
-	stats, ok := s.stats[bucket]
-	if !ok {
-		stats = &bucketS3RXTX{
-			s3OutputBytes: uint64(n),
-		}
-	} else {
-		stats.s3OutputBytes += uint64(n)
-	}
-	s.stats[bucket] = stats
-}
-
-type inOutBytes struct {
-	In  uint64
-	Out uint64
-}
-
-// Return S3 total input bytes for input bucket
-func (s *bucketConnStats) getS3InOutBytes() map[string]inOutBytes {
-	s.RLock()
-	defer s.RUnlock()
-
-	if len(s.stats) == 0 {
-		return nil
-	}
-
-	bucketStats := make(map[string]inOutBytes, len(s.stats))
-	for k, v := range s.stats {
-		bucketStats[k] = inOutBytes{
-			In:  v.s3InputBytes,
-			Out: v.s3OutputBytes,
-		}
-	}
-	return bucketStats
-}
-
-// Return S3 total input/output bytes for each
-func (s *bucketConnStats) getBucketS3InOutBytes(buckets []string) map[string]inOutBytes {
-	s.RLock()
-	defer s.RUnlock()
-
-	if len(s.stats) == 0 || len(buckets) == 0 {
-		return nil
-	}
-
-	bucketStats := make(map[string]inOutBytes, len(buckets))
-	for _, bucket := range buckets {
-		if stats, ok := s.stats[bucket]; ok {
-			bucketStats[bucket] = inOutBytes{
-				In:  stats.s3InputBytes,
-				Out: stats.s3OutputBytes,
-			}
-		}
-	}
-
-	return bucketStats
-}
-
-// delete metrics once bucket is deleted.
-func (s *bucketConnStats) delete(bucket string) {
-	s.Lock()
-	defer s.Unlock()
-
-	delete(s.stats, bucket)
+func newConnStats() *ConnStats {
+	return &ConnStats{}
 }
 
 // HTTPAPIStats holds statistics information about
@@ -331,37 +123,12 @@ func (stats *HTTPAPIStats) Dec(api string) {
 	}
 }
 
-// Get returns the current counter on input API string
-func (stats *HTTPAPIStats) Get(api string) int {
-	if stats == nil {
-		return 0
-	}
-
-	stats.RLock()
-	defer stats.RUnlock()
-
-	val, ok := stats.apiStats[api]
-	if ok {
-		return val
-	}
-
-	return 0
-}
-
 // Load returns the recorded stats.
-func (stats *HTTPAPIStats) Load(toLower bool) map[string]int {
-	if stats == nil {
-		return map[string]int{}
-	}
-
-	stats.RLock()
-	defer stats.RUnlock()
-
-	apiStats := make(map[string]int, len(stats.apiStats))
+func (stats *HTTPAPIStats) Load() map[string]int {
+	stats.Lock()
+	defer stats.Unlock()
+	var apiStats = make(map[string]int, len(stats.apiStats))
 	for k, v := range stats.apiStats {
-		if toLower {
-			k = strings.ToLower(k)
-		}
 		apiStats[k] = v
 	}
 	return apiStats
@@ -370,86 +137,67 @@ func (stats *HTTPAPIStats) Load(toLower bool) map[string]int {
 // HTTPStats holds statistics information about
 // HTTP requests made by all clients
 type HTTPStats struct {
-	s3RequestsInQueue       int32 // ref: https://golang.org/pkg/sync/atomic/#pkg-note-BUG
-	_                       int32 // For 64 bits alignment
-	s3RequestsIncoming      uint64
+	s3RequestsInQueue       int32
+	currentS3Requests       HTTPAPIStats
+	totalS3Requests         HTTPAPIStats
+	totalS3Errors           HTTPAPIStats
+	totalS3Canceled         HTTPAPIStats
 	rejectedRequestsAuth    uint64
 	rejectedRequestsTime    uint64
 	rejectedRequestsHeader  uint64
 	rejectedRequestsInvalid uint64
-	currentS3Requests       HTTPAPIStats
-	totalS3Requests         HTTPAPIStats
-	totalS3Errors           HTTPAPIStats
-	totalS34xxErrors        HTTPAPIStats
-	totalS35xxErrors        HTTPAPIStats
-	totalS3Canceled         HTTPAPIStats
-}
-
-func (st *HTTPStats) loadRequestsInQueue() int32 {
-	return atomic.LoadInt32(&st.s3RequestsInQueue)
 }
 
 func (st *HTTPStats) addRequestsInQueue(i int32) {
 	atomic.AddInt32(&st.s3RequestsInQueue, i)
 }
 
-func (st *HTTPStats) incS3RequestsIncoming() {
-	// Golang automatically resets to zero if this overflows
-	atomic.AddUint64(&st.s3RequestsIncoming, 1)
-}
-
 // Converts http stats into struct to be sent back to the client.
-func (st *HTTPStats) toServerHTTPStats(toLowerKeys bool) ServerHTTPStats {
+func (st *HTTPStats) toServerHTTPStats() ServerHTTPStats {
 	serverStats := ServerHTTPStats{}
-	serverStats.S3RequestsIncoming = atomic.SwapUint64(&st.s3RequestsIncoming, 0)
 	serverStats.S3RequestsInQueue = atomic.LoadInt32(&st.s3RequestsInQueue)
 	serverStats.TotalS3RejectedAuth = atomic.LoadUint64(&st.rejectedRequestsAuth)
 	serverStats.TotalS3RejectedTime = atomic.LoadUint64(&st.rejectedRequestsTime)
 	serverStats.TotalS3RejectedHeader = atomic.LoadUint64(&st.rejectedRequestsHeader)
 	serverStats.TotalS3RejectedInvalid = atomic.LoadUint64(&st.rejectedRequestsInvalid)
 	serverStats.CurrentS3Requests = ServerHTTPAPIStats{
-		APIStats: st.currentS3Requests.Load(toLowerKeys),
+		APIStats: st.currentS3Requests.Load(),
 	}
 	serverStats.TotalS3Requests = ServerHTTPAPIStats{
-		APIStats: st.totalS3Requests.Load(toLowerKeys),
+		APIStats: st.totalS3Requests.Load(),
 	}
 	serverStats.TotalS3Errors = ServerHTTPAPIStats{
-		APIStats: st.totalS3Errors.Load(toLowerKeys),
-	}
-	serverStats.TotalS34xxErrors = ServerHTTPAPIStats{
-		APIStats: st.totalS34xxErrors.Load(toLowerKeys),
-	}
-	serverStats.TotalS35xxErrors = ServerHTTPAPIStats{
-		APIStats: st.totalS35xxErrors.Load(toLowerKeys),
+		APIStats: st.totalS3Errors.Load(),
 	}
 	serverStats.TotalS3Canceled = ServerHTTPAPIStats{
-		APIStats: st.totalS3Canceled.Load(toLowerKeys),
+		APIStats: st.totalS3Canceled.Load(),
 	}
 	return serverStats
 }
 
 // Update statistics from http request and response data
-func (st *HTTPStats) updateStats(api string, w *xhttp.ResponseRecorder) {
-	st.totalS3Requests.Inc(api)
+func (st *HTTPStats) updateStats(api string, r *http.Request, w *logger.ResponseWriter) {
+	// A successful request has a 2xx response code
+	successReq := w.StatusCode >= 200 && w.StatusCode < 300
 
-	// Increment the prometheus http request response histogram with appropriate label
-	httpRequestsDuration.With(prometheus.Labels{"api": api}).Observe(w.TTFB().Seconds())
-
-	code := w.StatusCode
-
-	switch {
-	case code == 0:
-	case code == 499:
-		// 499 is a good error, shall be counted as canceled.
-		st.totalS3Canceled.Inc(api)
-	case code >= http.StatusBadRequest:
-		st.totalS3Errors.Inc(api)
-		if code >= http.StatusInternalServerError {
-			st.totalS35xxErrors.Inc(api)
-		} else {
-			st.totalS34xxErrors.Inc(api)
+	if !strings.HasSuffix(r.URL.Path, prometheusMetricsPathLegacy) ||
+		!strings.HasSuffix(r.URL.Path, prometheusMetricsV2ClusterPath) ||
+		!strings.HasSuffix(r.URL.Path, prometheusMetricsV2NodePath) {
+		st.totalS3Requests.Inc(api)
+		if !successReq {
+			switch w.StatusCode {
+			case 0:
+			case 499:
+				// 499 is a good error, shall be counted at canceled.
+				st.totalS3Canceled.Inc(api)
+			default:
+				st.totalS3Errors.Inc(api)
+			}
 		}
 	}
+
+	// Increment the prometheus http request response histogram with appropriate label
+	httpRequestsDuration.With(prometheus.Labels{"api": api}).Observe(w.TimeToFirstByte.Seconds())
 }
 
 // Prepare new HTTPStats structure

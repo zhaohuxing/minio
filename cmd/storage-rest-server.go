@@ -1,127 +1,67 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2018 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
 import (
 	"bufio"
-	"context"
 	"encoding/binary"
+	"encoding/gob"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net/http"
 	"os/user"
 	"path"
-	"runtime/debug"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/minio/minio/internal/grid"
 	"github.com/tinylib/msgp/msgp"
 
-	jwtreq "github.com/golang-jwt/jwt/v4/request"
-	"github.com/minio/madmin-go/v3"
-	"github.com/minio/minio/internal/config"
-	xhttp "github.com/minio/minio/internal/http"
-	xioutil "github.com/minio/minio/internal/ioutil"
-	xjwt "github.com/minio/minio/internal/jwt"
-	"github.com/minio/minio/internal/logger"
-	"github.com/minio/mux"
-	xnet "github.com/minio/pkg/v3/net"
+	jwtreq "github.com/dgrijalva/jwt-go/request"
+	"github.com/gorilla/mux"
+	"github.com/minio/minio/cmd/config"
+	xhttp "github.com/minio/minio/cmd/http"
+	xjwt "github.com/minio/minio/cmd/jwt"
+	"github.com/minio/minio/cmd/logger"
+	xnet "github.com/minio/minio/pkg/net"
 )
 
-var errDiskStale = errors.New("drive stale")
+var errDiskStale = errors.New("disk stale")
 
 // To abstract a disk over network.
 type storageRESTServer struct {
-	endpoint Endpoint
-}
-
-var (
-	storageCheckPartsRPC       = grid.NewSingleHandler[*CheckPartsHandlerParams, *CheckPartsResp](grid.HandlerCheckParts2, func() *CheckPartsHandlerParams { return &CheckPartsHandlerParams{} }, func() *CheckPartsResp { return &CheckPartsResp{} })
-	storageDeleteFileRPC       = grid.NewSingleHandler[*DeleteFileHandlerParams, grid.NoPayload](grid.HandlerDeleteFile, func() *DeleteFileHandlerParams { return &DeleteFileHandlerParams{} }, grid.NewNoPayload).AllowCallRequestPool(true)
-	storageDeleteVersionRPC    = grid.NewSingleHandler[*DeleteVersionHandlerParams, grid.NoPayload](grid.HandlerDeleteVersion, func() *DeleteVersionHandlerParams { return &DeleteVersionHandlerParams{} }, grid.NewNoPayload)
-	storageDiskInfoRPC         = grid.NewSingleHandler[*DiskInfoOptions, *DiskInfo](grid.HandlerDiskInfo, func() *DiskInfoOptions { return &DiskInfoOptions{} }, func() *DiskInfo { return &DiskInfo{} }).WithSharedResponse().AllowCallRequestPool(true)
-	storageNSScannerRPC        = grid.NewStream[*nsScannerOptions, grid.NoPayload, *nsScannerResp](grid.HandlerNSScanner, func() *nsScannerOptions { return &nsScannerOptions{} }, nil, func() *nsScannerResp { return &nsScannerResp{} })
-	storageReadAllRPC          = grid.NewSingleHandler[*ReadAllHandlerParams, *grid.Bytes](grid.HandlerReadAll, func() *ReadAllHandlerParams { return &ReadAllHandlerParams{} }, grid.NewBytes).AllowCallRequestPool(true)
-	storageWriteAllRPC         = grid.NewSingleHandler[*WriteAllHandlerParams, grid.NoPayload](grid.HandlerWriteAll, func() *WriteAllHandlerParams { return &WriteAllHandlerParams{} }, grid.NewNoPayload)
-	storageReadVersionRPC      = grid.NewSingleHandler[*grid.MSS, *FileInfo](grid.HandlerReadVersion, grid.NewMSS, func() *FileInfo { return &FileInfo{} })
-	storageReadXLRPC           = grid.NewSingleHandler[*grid.MSS, *RawFileInfo](grid.HandlerReadXL, grid.NewMSS, func() *RawFileInfo { return &RawFileInfo{} })
-	storageRenameDataRPC       = grid.NewSingleHandler[*RenameDataHandlerParams, *RenameDataResp](grid.HandlerRenameData2, func() *RenameDataHandlerParams { return &RenameDataHandlerParams{} }, func() *RenameDataResp { return &RenameDataResp{} })
-	storageRenameDataInlineRPC = grid.NewSingleHandler[*RenameDataInlineHandlerParams, *RenameDataResp](grid.HandlerRenameDataInline, newRenameDataInlineHandlerParams, func() *RenameDataResp { return &RenameDataResp{} }).AllowCallRequestPool(false)
-	storageRenameFileRPC       = grid.NewSingleHandler[*RenameFileHandlerParams, grid.NoPayload](grid.HandlerRenameFile, func() *RenameFileHandlerParams { return &RenameFileHandlerParams{} }, grid.NewNoPayload).AllowCallRequestPool(true)
-	storageRenamePartRPC       = grid.NewSingleHandler[*RenamePartHandlerParams, grid.NoPayload](grid.HandlerRenamePart, func() *RenamePartHandlerParams { return &RenamePartHandlerParams{} }, grid.NewNoPayload)
-	storageStatVolRPC          = grid.NewSingleHandler[*grid.MSS, *VolInfo](grid.HandlerStatVol, grid.NewMSS, func() *VolInfo { return &VolInfo{} })
-	storageUpdateMetadataRPC   = grid.NewSingleHandler[*MetadataHandlerParams, grid.NoPayload](grid.HandlerUpdateMetadata, func() *MetadataHandlerParams { return &MetadataHandlerParams{} }, grid.NewNoPayload)
-	storageWriteMetadataRPC    = grid.NewSingleHandler[*MetadataHandlerParams, grid.NoPayload](grid.HandlerWriteMetadata, func() *MetadataHandlerParams { return &MetadataHandlerParams{} }, grid.NewNoPayload)
-	storageListDirRPC          = grid.NewStream[*grid.MSS, grid.NoPayload, *ListDirResult](grid.HandlerListDir, grid.NewMSS, nil, func() *ListDirResult { return &ListDirResult{} }).WithOutCapacity(1)
-)
-
-func getStorageViaEndpoint(endpoint Endpoint) StorageAPI {
-	globalLocalDrivesMu.RLock()
-	defer globalLocalDrivesMu.RUnlock()
-	if len(globalLocalSetDrives) == 0 {
-		return globalLocalDrivesMap[endpoint.String()]
-	}
-	return globalLocalSetDrives[endpoint.PoolIdx][endpoint.SetIdx][endpoint.DiskIdx]
-}
-
-func (s *storageRESTServer) getStorage() StorageAPI {
-	return getStorageViaEndpoint(s.endpoint)
+	storage *xlStorage
 }
 
 func (s *storageRESTServer) writeErrorResponse(w http.ResponseWriter, err error) {
-	err = unwrapAll(err)
-	switch err {
-	case errDiskStale:
+	if errors.Is(err, errDiskStale) {
 		w.WriteHeader(http.StatusPreconditionFailed)
-	case errFileNotFound, errFileVersionNotFound:
-		w.WriteHeader(http.StatusNotFound)
-	case errInvalidAccessKeyID, errAccessKeyDisabled, errNoAuthToken, errMalformedAuth, errAuthentication, errSkewedAuthTime:
-		w.WriteHeader(http.StatusUnauthorized)
-	case context.Canceled, context.DeadlineExceeded:
-		w.WriteHeader(499)
-	default:
+	} else {
 		w.WriteHeader(http.StatusForbidden)
 	}
 	w.Write([]byte(err.Error()))
+	w.(http.Flusher).Flush()
 }
 
 // DefaultSkewTime - skew time is 15 minutes between minio peers.
 const DefaultSkewTime = 15 * time.Minute
-
-// validateStorageRequestToken will validate the token against the provided audience.
-func validateStorageRequestToken(token string) error {
-	claims := xjwt.NewStandardClaims()
-	if err := xjwt.ParseWithStandardClaims(token, claims, []byte(globalActiveCred.SecretKey)); err != nil {
-		return errAuthentication
-	}
-
-	owner := claims.AccessKey == globalActiveCred.AccessKey || claims.Subject == globalActiveCred.AccessKey
-	if !owner {
-		return errAuthentication
-	}
-
-	return nil
-}
 
 // Authenticates storage client's requests and validates for skewed time.
 func storageServerRequestValidate(r *http.Request) error {
@@ -130,36 +70,43 @@ func storageServerRequestValidate(r *http.Request) error {
 		if err == jwtreq.ErrNoTokenInRequest {
 			return errNoAuthToken
 		}
-		return errMalformedAuth
-	}
-
-	if err = validateStorageRequestToken(token); err != nil {
 		return err
 	}
 
-	nanoTime, err := strconv.ParseInt(r.Header.Get("X-Minio-Time"), 10, 64)
-	if err != nil {
-		return errMalformedAuth
+	claims := xjwt.NewStandardClaims()
+	if err = xjwt.ParseWithStandardClaims(token, claims, []byte(globalActiveCred.SecretKey)); err != nil {
+		return errAuthentication
 	}
 
-	localTime := UTCNow()
-	remoteTime := time.Unix(0, nanoTime)
+	owner := claims.AccessKey == globalActiveCred.AccessKey || claims.Subject == globalActiveCred.AccessKey
+	if !owner {
+		return errAuthentication
+	}
 
-	delta := remoteTime.Sub(localTime)
+	if claims.Audience != r.URL.RawQuery {
+		return errAuthentication
+	}
+
+	requestTimeStr := r.Header.Get("X-Minio-Time")
+	requestTime, err := time.Parse(time.RFC3339, requestTimeStr)
+	if err != nil {
+		return err
+	}
+	utcNow := UTCNow()
+	delta := requestTime.Sub(utcNow)
 	if delta < 0 {
 		delta *= -1
 	}
-
 	if delta > DefaultSkewTime {
-		return errSkewedAuthTime
+		return fmt.Errorf("client time %v is too apart with server time %v", requestTime, utcNow)
 	}
 
 	return nil
 }
 
-// IsAuthValid - To authenticate and verify the time difference.
-func (s *storageRESTServer) IsAuthValid(w http.ResponseWriter, r *http.Request) bool {
-	if s.getStorage() == nil {
+// IsValid - To authenticate and verify the time difference.
+func (s *storageRESTServer) IsValid(w http.ResponseWriter, r *http.Request) bool {
+	if s.storage == nil {
 		s.writeErrorResponse(w, errDiskNotFound)
 		return false
 	}
@@ -169,21 +116,7 @@ func (s *storageRESTServer) IsAuthValid(w http.ResponseWriter, r *http.Request) 
 		return false
 	}
 
-	return true
-}
-
-// IsValid - To authenticate and check if the disk-id in the request corresponds to the underlying disk.
-func (s *storageRESTServer) IsValid(w http.ResponseWriter, r *http.Request) bool {
-	if !s.IsAuthValid(w, r) {
-		return false
-	}
-
-	if err := r.ParseForm(); err != nil {
-		s.writeErrorResponse(w, err)
-		return false
-	}
-
-	diskID := r.Form.Get(storageRESTDiskID)
+	diskID := r.URL.Query().Get(storageRESTDiskID)
 	if diskID == "" {
 		// Request sent empty disk-id, we allow the request
 		// as the peer might be coming up and trying to read format.json
@@ -191,7 +124,7 @@ func (s *storageRESTServer) IsValid(w http.ResponseWriter, r *http.Request) bool
 		return true
 	}
 
-	storedDiskID, err := s.getStorage().GetDiskID()
+	storedDiskID, err := s.storage.GetDiskID()
 	if err != nil {
 		s.writeErrorResponse(w, err)
 		return false
@@ -206,73 +139,46 @@ func (s *storageRESTServer) IsValid(w http.ResponseWriter, r *http.Request) bool
 	return true
 }
 
-// checkID - check if the disk-id in the request corresponds to the underlying disk.
-func (s *storageRESTServer) checkID(wantID string) bool {
-	if s.getStorage() == nil {
-		return false
-	}
-	if wantID == "" {
-		// Request sent empty disk-id, we allow the request
-		// as the peer might be coming up and trying to read format.json
-		// or create format.json
-		return true
-	}
-
-	storedDiskID, err := s.getStorage().GetDiskID()
-	if err != nil {
-		return false
-	}
-
-	return wantID == storedDiskID
-}
-
 // HealthHandler handler checks if disk is stale
 func (s *storageRESTServer) HealthHandler(w http.ResponseWriter, r *http.Request) {
 	s.IsValid(w, r)
 }
 
 // DiskInfoHandler - returns disk info.
-func (s *storageRESTServer) DiskInfoHandler(opts *DiskInfoOptions) (*DiskInfo, *grid.RemoteErr) {
-	if !s.checkID(opts.DiskID) {
-		return nil, grid.NewRemoteErr(errDiskNotFound)
+func (s *storageRESTServer) DiskInfoHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.IsValid(w, r) {
+		return
 	}
-	info, err := s.getStorage().DiskInfo(context.Background(), *opts)
+	info, err := s.storage.DiskInfo(r.Context())
 	if err != nil {
 		info.Error = err.Error()
 	}
-	return &info, nil
+	defer w.(http.Flusher).Flush()
+	logger.LogIf(r.Context(), msgp.Encode(w, &info))
 }
 
-func (s *storageRESTServer) NSScannerHandler(ctx context.Context, params *nsScannerOptions, out chan<- *nsScannerResp) *grid.RemoteErr {
-	if !s.checkID(params.DiskID) {
-		return grid.NewRemoteErr(errDiskNotFound)
-	}
-	if params.Cache == nil {
-		return grid.NewRemoteErrString("NSScannerHandler: provided cache is nil")
+func (s *storageRESTServer) NSScannerHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.IsValid(w, r) {
+		return
 	}
 
-	// Collect updates, stream them before the full cache is sent.
-	updates := make(chan dataUsageEntry, 1)
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for update := range updates {
-			resp := storageNSScannerRPC.NewResponse()
-			resp.Update = &update
-			out <- resp
-		}
-	}()
-	ui, err := s.getStorage().NSScanner(ctx, *params.Cache, updates, madmin.HealScanMode(params.ScanMode), nil)
-	wg.Wait()
+	setEventStreamHeaders(w)
+
+	var cache dataUsageCache
+	err := cache.deserialize(r.Body)
 	if err != nil {
-		return grid.NewRemoteErr(err)
+		logger.LogIf(r.Context(), err)
+		s.writeErrorResponse(w, err)
+		return
 	}
-	// Send final response.
-	resp := storageNSScannerRPC.NewResponse()
-	resp.Final = &ui
-	out <- resp
-	return nil
+
+	resp := streamHTTPResponse(w)
+	usageInfo, err := s.storage.NSScanner(r.Context(), cache)
+	if err != nil {
+		resp.CloseWithError(err)
+		return
+	}
+	resp.CloseWithError(usageInfo.serializeTo(resp))
 }
 
 // MakeVolHandler - make a volume.
@@ -280,8 +186,9 @@ func (s *storageRESTServer) MakeVolHandler(w http.ResponseWriter, r *http.Reques
 	if !s.IsValid(w, r) {
 		return
 	}
-	volume := r.Form.Get(storageRESTVolume)
-	err := s.getStorage().MakeVol(r.Context(), volume)
+	vars := mux.Vars(r)
+	volume := vars[storageRESTVolume]
+	err := s.storage.MakeVol(r.Context(), volume)
 	if err != nil {
 		s.writeErrorResponse(w, err)
 	}
@@ -292,23 +199,56 @@ func (s *storageRESTServer) MakeVolBulkHandler(w http.ResponseWriter, r *http.Re
 	if !s.IsValid(w, r) {
 		return
 	}
-	volumes := strings.Split(r.Form.Get(storageRESTVolumes), ",")
-	err := s.getStorage().MakeVolBulk(r.Context(), volumes...)
+	vars := mux.Vars(r)
+	volumes := strings.Split(vars[storageRESTVolumes], ",")
+	err := s.storage.MakeVolBulk(r.Context(), volumes...)
 	if err != nil {
 		s.writeErrorResponse(w, err)
 	}
 }
 
-// StatVolHandler - stat a volume.
-func (s *storageRESTServer) StatVolHandler(params *grid.MSS) (*VolInfo, *grid.RemoteErr) {
-	if !s.checkID(params.Get(storageRESTDiskID)) {
-		return nil, grid.NewRemoteErr(errDiskNotFound)
+// ListVolsHandler - list volumes.
+func (s *storageRESTServer) ListVolsHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.IsValid(w, r) {
+		return
 	}
-	info, err := s.getStorage().StatVol(context.Background(), params.Get(storageRESTVolume))
+	infos, err := s.storage.ListVols(r.Context())
 	if err != nil {
-		return nil, grid.NewRemoteErr(err)
+		s.writeErrorResponse(w, err)
+		return
 	}
-	return &info, nil
+	defer w.(http.Flusher).Flush()
+	logger.LogIf(r.Context(), msgp.Encode(w, VolsInfo(infos)))
+}
+
+// StatVolHandler - stat a volume.
+func (s *storageRESTServer) StatVolHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.IsValid(w, r) {
+		return
+	}
+	vars := mux.Vars(r)
+	volume := vars[storageRESTVolume]
+	info, err := s.storage.StatVol(r.Context(), volume)
+	if err != nil {
+		s.writeErrorResponse(w, err)
+		return
+	}
+	defer w.(http.Flusher).Flush()
+	logger.LogIf(r.Context(), msgp.Encode(w, &info))
+}
+
+// DeleteVolumeHandler - delete a volume.
+func (s *storageRESTServer) DeleteVolHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.IsValid(w, r) {
+		return
+	}
+	vars := mux.Vars(r)
+	volume := vars[storageRESTVolume]
+	forceDelete := vars[storageRESTForceDelete] == "true"
+	err := s.storage.DeleteVol(r.Context(), volume, forceDelete)
+	if err != nil {
+		s.writeErrorResponse(w, err)
+	}
 }
 
 // AppendFileHandler - append data from the request to the file specified.
@@ -316,8 +256,9 @@ func (s *storageRESTServer) AppendFileHandler(w http.ResponseWriter, r *http.Req
 	if !s.IsValid(w, r) {
 		return
 	}
-	volume := r.Form.Get(storageRESTVolume)
-	filePath := r.Form.Get(storageRESTFilePath)
+	vars := mux.Vars(r)
+	volume := vars[storageRESTVolume]
+	filePath := vars[storageRESTFilePath]
 
 	buf := make([]byte, r.ContentLength)
 	_, err := io.ReadFull(r.Body, buf)
@@ -325,230 +266,220 @@ func (s *storageRESTServer) AppendFileHandler(w http.ResponseWriter, r *http.Req
 		s.writeErrorResponse(w, err)
 		return
 	}
-	err = s.getStorage().AppendFile(r.Context(), volume, filePath, buf)
+	err = s.storage.AppendFile(r.Context(), volume, filePath, buf)
 	if err != nil {
 		s.writeErrorResponse(w, err)
 	}
 }
 
-// CreateFileHandler - copy the contents from the request.
+// CreateFileHandler - fallocate() space for a file and copy the contents from the request.
 func (s *storageRESTServer) CreateFileHandler(w http.ResponseWriter, r *http.Request) {
 	if !s.IsValid(w, r) {
 		return
 	}
+	vars := mux.Vars(r)
+	volume := vars[storageRESTVolume]
+	filePath := vars[storageRESTFilePath]
 
-	volume := r.Form.Get(storageRESTVolume)
-	filePath := r.Form.Get(storageRESTFilePath)
-	origvolume := r.Form.Get(storageRESTOrigVolume)
-
-	fileSizeStr := r.Form.Get(storageRESTLength)
+	fileSizeStr := vars[storageRESTLength]
 	fileSize, err := strconv.Atoi(fileSizeStr)
 	if err != nil {
 		s.writeErrorResponse(w, err)
 		return
 	}
 
-	done, body := keepHTTPReqResponseAlive(w, r)
-	done(s.getStorage().CreateFile(r.Context(), origvolume, volume, filePath, int64(fileSize), body))
+	done := keepHTTPResponseAlive(w)
+	done(s.storage.CreateFile(r.Context(), volume, filePath, int64(fileSize), r.Body))
 }
 
-// DeleteVersionHandler delete updated metadata.
-func (s *storageRESTServer) DeleteVersionHandler(p *DeleteVersionHandlerParams) (np grid.NoPayload, gerr *grid.RemoteErr) {
-	if !s.checkID(p.DiskID) {
-		return np, grid.NewRemoteErr(errDiskNotFound)
+// DeleteVersion delete updated metadata.
+func (s *storageRESTServer) DeleteVersionHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.IsValid(w, r) {
+		return
 	}
-	volume := p.Volume
-	filePath := p.FilePath
-	forceDelMarker := p.ForceDelMarker
+	vars := mux.Vars(r)
+	volume := vars[storageRESTVolume]
+	filePath := vars[storageRESTFilePath]
+	forceDelMarker, err := strconv.ParseBool(vars[storageRESTForceDelMarker])
+	if err != nil {
+		s.writeErrorResponse(w, errInvalidArgument)
+		return
+	}
 
-	opts := DeleteOptions{}
-	err := s.getStorage().DeleteVersion(context.Background(), volume, filePath, p.FI, forceDelMarker, opts)
-	return np, grid.NewRemoteErr(err)
+	if r.ContentLength < 0 {
+		s.writeErrorResponse(w, errInvalidArgument)
+		return
+	}
+
+	var fi FileInfo
+	if err := msgp.Decode(r.Body, &fi); err != nil {
+		s.writeErrorResponse(w, err)
+		return
+	}
+
+	err = s.storage.DeleteVersion(r.Context(), volume, filePath, fi, forceDelMarker)
+	if err != nil {
+		s.writeErrorResponse(w, err)
+	}
 }
 
-// ReadVersionHandlerWS read metadata of versionID
-func (s *storageRESTServer) ReadVersionHandlerWS(params *grid.MSS) (*FileInfo, *grid.RemoteErr) {
-	if !s.checkID(params.Get(storageRESTDiskID)) {
-		return nil, grid.NewRemoteErr(errDiskNotFound)
-	}
-	origvolume := params.Get(storageRESTOrigVolume)
-	volume := params.Get(storageRESTVolume)
-	filePath := params.Get(storageRESTFilePath)
-	versionID := params.Get(storageRESTVersionID)
-
-	healing, err := strconv.ParseBool(params.Get(storageRESTHealing))
-	if err != nil {
-		return nil, grid.NewRemoteErr(err)
-	}
-
-	inclFreeVersions, err := strconv.ParseBool(params.Get(storageRESTInclFreeVersions))
-	if err != nil {
-		return nil, grid.NewRemoteErr(err)
-	}
-
-	fi, err := s.getStorage().ReadVersion(context.Background(), origvolume, volume, filePath, versionID, ReadOptions{
-		InclFreeVersions: inclFreeVersions,
-		ReadData:         false,
-		Healing:          healing,
-	})
-	if err != nil {
-		return nil, grid.NewRemoteErr(err)
-	}
-	return &fi, nil
-}
-
-// ReadVersionHandler read metadata of versionID
+// ReadVersion read metadata of versionID
 func (s *storageRESTServer) ReadVersionHandler(w http.ResponseWriter, r *http.Request) {
 	if !s.IsValid(w, r) {
 		return
 	}
-	origvolume := r.Form.Get(storageRESTOrigVolume)
-	volume := r.Form.Get(storageRESTVolume)
-	filePath := r.Form.Get(storageRESTFilePath)
-	versionID := r.Form.Get(storageRESTVersionID)
-	healing, err := strconv.ParseBool(r.Form.Get(storageRESTHealing))
+	vars := mux.Vars(r)
+	volume := vars[storageRESTVolume]
+	filePath := vars[storageRESTFilePath]
+	versionID := vars[storageRESTVersionID]
+	readData, err := strconv.ParseBool(vars[storageRESTReadData])
 	if err != nil {
 		s.writeErrorResponse(w, err)
 		return
 	}
 
-	inclFreeVersions, err := strconv.ParseBool(r.Form.Get(storageRESTInclFreeVersions))
+	fi, err := s.storage.ReadVersion(r.Context(), volume, filePath, versionID, readData)
 	if err != nil {
 		s.writeErrorResponse(w, err)
 		return
 	}
 
-	fi, err := s.getStorage().ReadVersion(r.Context(), origvolume, volume, filePath, versionID, ReadOptions{
-		InclFreeVersions: inclFreeVersions,
-		ReadData:         true,
-		Healing:          healing,
-	})
-	if err != nil {
-		s.writeErrorResponse(w, err)
-		return
-	}
-
-	storageLogIf(r.Context(), msgp.Encode(w, &fi))
+	logger.LogIf(r.Context(), msgp.Encode(w, &fi))
 }
 
-// WriteMetadataHandler rpc handler to write new updated metadata.
-func (s *storageRESTServer) WriteMetadataHandler(p *MetadataHandlerParams) (np grid.NoPayload, gerr *grid.RemoteErr) {
-	if !s.checkID(p.DiskID) {
-		return grid.NewNPErr(errDiskNotFound)
+// WriteMetadata write new updated metadata.
+func (s *storageRESTServer) WriteMetadataHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.IsValid(w, r) {
+		return
+	}
+	vars := mux.Vars(r)
+	volume := vars[storageRESTVolume]
+	filePath := vars[storageRESTFilePath]
+
+	if r.ContentLength < 0 {
+		s.writeErrorResponse(w, errInvalidArgument)
+		return
 	}
 
-	volume := p.Volume
-	filePath := p.FilePath
-	origvolume := p.OrigVolume
+	var fi FileInfo
+	if err := msgp.Decode(r.Body, &fi); err != nil {
+		s.writeErrorResponse(w, err)
+		return
+	}
 
-	err := s.getStorage().WriteMetadata(context.Background(), origvolume, volume, filePath, p.FI)
-	return np, grid.NewRemoteErr(err)
+	err := s.storage.WriteMetadata(r.Context(), volume, filePath, fi)
+	if err != nil {
+		s.writeErrorResponse(w, err)
+	}
 }
 
-// UpdateMetadataHandler update new updated metadata.
-func (s *storageRESTServer) UpdateMetadataHandler(p *MetadataHandlerParams) (grid.NoPayload, *grid.RemoteErr) {
-	if !s.checkID(p.DiskID) {
-		return grid.NewNPErr(errDiskNotFound)
+// UpdateMetadata update new updated metadata.
+func (s *storageRESTServer) UpdateMetadataHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.IsValid(w, r) {
+		return
 	}
-	volume := p.Volume
-	filePath := p.FilePath
+	vars := mux.Vars(r)
+	volume := vars[storageRESTVolume]
+	filePath := vars[storageRESTFilePath]
 
-	return grid.NewNPErr(s.getStorage().UpdateMetadata(context.Background(), volume, filePath, p.FI, p.UpdateOpts))
+	if r.ContentLength < 0 {
+		s.writeErrorResponse(w, errInvalidArgument)
+		return
+	}
+
+	var fi FileInfo
+	if err := msgp.Decode(r.Body, &fi); err != nil {
+		s.writeErrorResponse(w, err)
+		return
+	}
+
+	err := s.storage.UpdateMetadata(r.Context(), volume, filePath, fi)
+	if err != nil {
+		s.writeErrorResponse(w, err)
+	}
+}
+
+// WriteAllHandler - write to file all content.
+func (s *storageRESTServer) WriteAllHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.IsValid(w, r) {
+		return
+	}
+	vars := mux.Vars(r)
+	volume := vars[storageRESTVolume]
+	filePath := vars[storageRESTFilePath]
+
+	if r.ContentLength < 0 {
+		s.writeErrorResponse(w, errInvalidArgument)
+		return
+	}
+	tmp := make([]byte, r.ContentLength)
+	_, err := io.ReadFull(r.Body, tmp)
+	if err != nil {
+		s.writeErrorResponse(w, err)
+		return
+	}
+	err = s.storage.WriteAll(r.Context(), volume, filePath, tmp)
+	if err != nil {
+		s.writeErrorResponse(w, err)
+	}
 }
 
 // CheckPartsHandler - check if a file metadata exists.
-func (s *storageRESTServer) CheckPartsHandler(p *CheckPartsHandlerParams) (*CheckPartsResp, *grid.RemoteErr) {
-	if !s.checkID(p.DiskID) {
-		return nil, grid.NewRemoteErr(errDiskNotFound)
+func (s *storageRESTServer) CheckPartsHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.IsValid(w, r) {
+		return
 	}
-	volume := p.Volume
-	filePath := p.FilePath
+	vars := mux.Vars(r)
+	volume := vars[storageRESTVolume]
+	filePath := vars[storageRESTFilePath]
 
-	resp, err := s.getStorage().CheckParts(context.Background(), volume, filePath, p.FI)
-	return resp, grid.NewRemoteErr(err)
+	if r.ContentLength < 0 {
+		s.writeErrorResponse(w, errInvalidArgument)
+		return
+	}
+
+	var fi FileInfo
+	if err := msgp.Decode(r.Body, &fi); err != nil {
+		s.writeErrorResponse(w, err)
+		return
+	}
+
+	if err := s.storage.CheckParts(r.Context(), volume, filePath, fi); err != nil {
+		s.writeErrorResponse(w, err)
+	}
 }
 
-func (s *storageRESTServer) WriteAllHandler(p *WriteAllHandlerParams) (grid.NoPayload, *grid.RemoteErr) {
-	if !s.checkID(p.DiskID) {
-		return grid.NewNPErr(errDiskNotFound)
+// CheckFileHandler - check if a file metadata exists.
+func (s *storageRESTServer) CheckFileHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.IsValid(w, r) {
+		return
 	}
+	vars := mux.Vars(r)
+	volume := vars[storageRESTVolume]
+	filePath := vars[storageRESTFilePath]
 
-	volume := p.Volume
-	filePath := p.FilePath
-
-	return grid.NewNPErr(s.getStorage().WriteAll(context.Background(), volume, filePath, p.Buf))
+	if err := s.storage.CheckFile(r.Context(), volume, filePath); err != nil {
+		s.writeErrorResponse(w, err)
+	}
 }
 
 // ReadAllHandler - read all the contents of a file.
-func (s *storageRESTServer) ReadAllHandler(p *ReadAllHandlerParams) (*grid.Bytes, *grid.RemoteErr) {
-	if !s.checkID(p.DiskID) {
-		return nil, grid.NewRemoteErr(errDiskNotFound)
-	}
-
-	volume := p.Volume
-	filePath := p.FilePath
-
-	buf, err := s.getStorage().ReadAll(context.Background(), volume, filePath)
-	return grid.NewBytesWith(buf), grid.NewRemoteErr(err)
-}
-
-// ReadXLHandler - read xl.meta for an object at path.
-func (s *storageRESTServer) ReadXLHandler(w http.ResponseWriter, r *http.Request) {
+func (s *storageRESTServer) ReadAllHandler(w http.ResponseWriter, r *http.Request) {
 	if !s.IsValid(w, r) {
 		return
 	}
+	vars := mux.Vars(r)
+	volume := vars[storageRESTVolume]
+	filePath := vars[storageRESTFilePath]
 
-	volume := r.Form.Get(storageRESTVolume)
-	filePath := r.Form.Get(storageRESTFilePath)
-
-	rf, err := s.getStorage().ReadXL(r.Context(), volume, filePath, true)
+	buf, err := s.storage.ReadAll(r.Context(), volume, filePath)
 	if err != nil {
 		s.writeErrorResponse(w, err)
 		return
 	}
-
-	storageLogIf(r.Context(), msgp.Encode(w, &rf))
-}
-
-// ReadXLHandlerWS - read xl.meta for an object at path.
-func (s *storageRESTServer) ReadXLHandlerWS(params *grid.MSS) (*RawFileInfo, *grid.RemoteErr) {
-	if !s.checkID(params.Get(storageRESTDiskID)) {
-		return nil, grid.NewRemoteErr(errDiskNotFound)
-	}
-
-	volume := params.Get(storageRESTVolume)
-	filePath := params.Get(storageRESTFilePath)
-	rf, err := s.getStorage().ReadXL(context.Background(), volume, filePath, false)
-	if err != nil {
-		return nil, grid.NewRemoteErr(err)
-	}
-
-	return &rf, nil
-}
-
-// ReadPartsHandler - read section of a file.
-func (s *storageRESTServer) ReadPartsHandler(w http.ResponseWriter, r *http.Request) {
-	if !s.IsValid(w, r) {
-		return
-	}
-	volume := r.Form.Get(storageRESTVolume)
-
-	var preq ReadPartsReq
-	if err := msgp.Decode(r.Body, &preq); err != nil {
-		s.writeErrorResponse(w, err)
-		return
-	}
-
-	done := keepHTTPResponseAlive(w)
-	infos, err := s.getStorage().ReadParts(r.Context(), volume, preq.Paths...)
-	done(nil)
-	if err != nil {
-		s.writeErrorResponse(w, err)
-		return
-	}
-
-	presp := &ReadPartsResp{Infos: infos}
-	storageLogIf(r.Context(), msgp.Encode(w, presp))
+	w.Header().Set(xhttp.ContentLength, strconv.Itoa(len(buf)))
+	w.Write(buf)
+	w.(http.Flusher).Flush()
 }
 
 // ReadFileHandler - read section of a file.
@@ -556,14 +487,15 @@ func (s *storageRESTServer) ReadFileHandler(w http.ResponseWriter, r *http.Reque
 	if !s.IsValid(w, r) {
 		return
 	}
-	volume := r.Form.Get(storageRESTVolume)
-	filePath := r.Form.Get(storageRESTFilePath)
-	offset, err := strconv.Atoi(r.Form.Get(storageRESTOffset))
+	vars := mux.Vars(r)
+	volume := vars[storageRESTVolume]
+	filePath := vars[storageRESTFilePath]
+	offset, err := strconv.Atoi(vars[storageRESTOffset])
 	if err != nil {
 		s.writeErrorResponse(w, err)
 		return
 	}
-	length, err := strconv.Atoi(r.Form.Get(storageRESTLength))
+	length, err := strconv.Atoi(vars[storageRESTLength])
 	if err != nil {
 		s.writeErrorResponse(w, err)
 		return
@@ -573,85 +505,110 @@ func (s *storageRESTServer) ReadFileHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var verifier *BitrotVerifier
-	if r.Form.Get(storageRESTBitrotAlgo) != "" {
-		hashStr := r.Form.Get(storageRESTBitrotHash)
+	if vars[storageRESTBitrotAlgo] != "" {
+		hashStr := vars[storageRESTBitrotHash]
 		var hash []byte
 		hash, err = hex.DecodeString(hashStr)
 		if err != nil {
 			s.writeErrorResponse(w, err)
 			return
 		}
-		verifier = NewBitrotVerifier(BitrotAlgorithmFromString(r.Form.Get(storageRESTBitrotAlgo)), hash)
+		verifier = NewBitrotVerifier(BitrotAlgorithmFromString(vars[storageRESTBitrotAlgo]), hash)
 	}
 	buf := make([]byte, length)
-	defer metaDataPoolPut(buf) // Reuse if we can.
-	_, err = s.getStorage().ReadFile(r.Context(), volume, filePath, int64(offset), buf, verifier)
+	_, err = s.storage.ReadFile(r.Context(), volume, filePath, int64(offset), buf, verifier)
 	if err != nil {
 		s.writeErrorResponse(w, err)
 		return
 	}
 	w.Header().Set(xhttp.ContentLength, strconv.Itoa(len(buf)))
 	w.Write(buf)
+	w.(http.Flusher).Flush()
 }
 
-// ReadFileStreamHandler - read section of a file.
+// ReadFileHandler - read section of a file.
 func (s *storageRESTServer) ReadFileStreamHandler(w http.ResponseWriter, r *http.Request) {
 	if !s.IsValid(w, r) {
 		return
 	}
-	volume := r.Form.Get(storageRESTVolume)
-	filePath := r.Form.Get(storageRESTFilePath)
-	offset, err := strconv.ParseInt(r.Form.Get(storageRESTOffset), 10, 64)
+	vars := mux.Vars(r)
+	volume := vars[storageRESTVolume]
+	filePath := vars[storageRESTFilePath]
+	offset, err := strconv.Atoi(vars[storageRESTOffset])
 	if err != nil {
 		s.writeErrorResponse(w, err)
 		return
 	}
-	length, err := strconv.ParseInt(r.Form.Get(storageRESTLength), 10, 64)
+	length, err := strconv.Atoi(vars[storageRESTLength])
 	if err != nil {
 		s.writeErrorResponse(w, err)
 		return
 	}
 
-	rc, err := s.getStorage().ReadFileStream(r.Context(), volume, filePath, offset, length)
+	rc, err := s.storage.ReadFileStream(r.Context(), volume, filePath, int64(offset), int64(length))
 	if err != nil {
 		s.writeErrorResponse(w, err)
 		return
 	}
 	defer rc.Close()
 
-	_, err = xioutil.Copy(w, rc)
-	if !xnet.IsNetworkOrHostDown(err, true) { // do not need to log disconnected clients
-		storageLogIf(r.Context(), err)
+	w.Header().Set(xhttp.ContentLength, strconv.Itoa(length))
+	if _, err = io.Copy(w, rc); err != nil {
+		if !xnet.IsNetworkOrHostDown(err, true) { // do not need to log disconnected clients
+			logger.LogIf(r.Context(), err)
+		}
+		return
 	}
+	w.(http.Flusher).Flush()
 }
 
 // ListDirHandler - list a directory.
-func (s *storageRESTServer) ListDirHandler(ctx context.Context, params *grid.MSS, out chan<- *ListDirResult) *grid.RemoteErr {
-	if !s.checkID(params.Get(storageRESTDiskID)) {
-		return grid.NewRemoteErr(errDiskNotFound)
+func (s *storageRESTServer) ListDirHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.IsValid(w, r) {
+		return
 	}
-	volume := params.Get(storageRESTVolume)
-	dirPath := params.Get(storageRESTDirPath)
-	origvolume := params.Get(storageRESTOrigVolume)
-	count, err := strconv.Atoi(params.Get(storageRESTCount))
+	vars := mux.Vars(r)
+	volume := vars[storageRESTVolume]
+	dirPath := vars[storageRESTDirPath]
+	count, err := strconv.Atoi(vars[storageRESTCount])
 	if err != nil {
-		return grid.NewRemoteErr(err)
+		s.writeErrorResponse(w, err)
+		return
 	}
 
-	entries, err := s.getStorage().ListDir(ctx, origvolume, volume, dirPath, count)
+	entries, err := s.storage.ListDir(r.Context(), volume, dirPath, count)
 	if err != nil {
-		return grid.NewRemoteErr(err)
+		s.writeErrorResponse(w, err)
+		return
 	}
-	out <- &ListDirResult{Entries: entries}
-	return nil
+	gob.NewEncoder(w).Encode(&entries)
+	w.(http.Flusher).Flush()
 }
 
 // DeleteFileHandler - delete a file.
-func (s *storageRESTServer) DeleteFileHandler(p *DeleteFileHandlerParams) (grid.NoPayload, *grid.RemoteErr) {
-	if !s.checkID(p.DiskID) {
-		return grid.NewNPErr(errDiskNotFound)
+func (s *storageRESTServer) DeleteFileHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.IsValid(w, r) {
+		return
 	}
-	return grid.NewNPErr(s.getStorage().Delete(context.Background(), p.Volume, p.FilePath, p.Opts))
+	vars := mux.Vars(r)
+	volume := vars[storageRESTVolume]
+	filePath := vars[storageRESTFilePath]
+	recursive, err := strconv.ParseBool(vars[storageRESTRecursive])
+	if err != nil {
+		s.writeErrorResponse(w, err)
+		return
+	}
+
+	err = s.storage.Delete(r.Context(), volume, filePath, recursive)
+	if err != nil {
+		s.writeErrorResponse(w, err)
+	}
+}
+
+// DeleteVersionsErrsResp - collection of delete errors
+// for bulk version deletes
+type DeleteVersionsErrsResp struct {
+	Errs []error
 }
 
 // DeleteVersionsHandler - delete a set of a versions.
@@ -660,16 +617,17 @@ func (s *storageRESTServer) DeleteVersionsHandler(w http.ResponseWriter, r *http
 		return
 	}
 
-	volume := r.Form.Get(storageRESTVolume)
-	totalVersions, err := strconv.Atoi(r.Form.Get(storageRESTTotalVersions))
+	vars := r.URL.Query()
+	volume := vars.Get(storageRESTVolume)
+
+	totalVersions, err := strconv.Atoi(vars.Get(storageRESTTotalVersions))
 	if err != nil {
 		s.writeErrorResponse(w, err)
 		return
 	}
 
-	versions := make([]FileInfoVersions, totalVersions)
-	decoder := msgpNewReader(r.Body)
-	defer readMsgpReaderPoolPut(decoder)
+	versions := make([]FileInfo, totalVersions)
+	decoder := msgp.NewReader(r.Body)
 	for i := 0; i < totalVersions; i++ {
 		dst := &versions[i]
 		if err := dst.DecodeMsg(decoder); err != nil {
@@ -678,188 +636,69 @@ func (s *storageRESTServer) DeleteVersionsHandler(w http.ResponseWriter, r *http
 		}
 	}
 
-	done := keepHTTPResponseAlive(w)
-	opts := DeleteOptions{}
-	errs := s.getStorage().DeleteVersions(r.Context(), volume, versions, opts)
-	done(nil)
+	dErrsResp := &DeleteVersionsErrsResp{Errs: make([]error, totalVersions)}
 
-	dErrsResp := &DeleteVersionsErrsResp{Errs: make([]string, totalVersions)}
+	setEventStreamHeaders(w)
+	encoder := gob.NewEncoder(w)
+	done := keepHTTPResponseAlive(w)
+	errs := s.storage.DeleteVersions(r.Context(), volume, versions)
+	done(nil)
 	for idx := range versions {
 		if errs[idx] != nil {
-			dErrsResp.Errs[idx] = errs[idx].Error()
+			dErrsResp.Errs[idx] = StorageErr(errs[idx].Error())
 		}
 	}
-
-	buf, _ := dErrsResp.MarshalMsg(nil)
-	w.Write(buf)
+	encoder.Encode(dErrsResp)
+	w.(http.Flusher).Flush()
 }
 
 // RenameDataHandler - renames a meta object and data dir to destination.
-func (s *storageRESTServer) RenameDataHandler(p *RenameDataHandlerParams) (*RenameDataResp, *grid.RemoteErr) {
-	if !s.checkID(p.DiskID) {
-		return nil, grid.NewRemoteErr(errDiskNotFound)
-	}
-
-	resp, err := s.getStorage().RenameData(context.Background(), p.SrcVolume, p.SrcPath, p.FI, p.DstVolume, p.DstPath, p.Opts)
-	return &resp, grid.NewRemoteErr(err)
-}
-
-// RenameDataInlineHandler - renames a meta object and data dir to destination.
-func (s *storageRESTServer) RenameDataInlineHandler(p *RenameDataInlineHandlerParams) (*RenameDataResp, *grid.RemoteErr) {
-	defer p.Recycle()
-	return s.RenameDataHandler(&p.RenameDataHandlerParams)
-}
-
-// RenameFileHandler - rename a file from source to destination
-func (s *storageRESTServer) RenameFileHandler(p *RenameFileHandlerParams) (grid.NoPayload, *grid.RemoteErr) {
-	if !s.checkID(p.DiskID) {
-		return grid.NewNPErr(errDiskNotFound)
-	}
-	return grid.NewNPErr(s.getStorage().RenameFile(context.Background(), p.SrcVolume, p.SrcFilePath, p.DstVolume, p.DstFilePath))
-}
-
-// RenamePartHandler - rename a multipart part from source to destination
-func (s *storageRESTServer) RenamePartHandler(p *RenamePartHandlerParams) (grid.NoPayload, *grid.RemoteErr) {
-	if !s.checkID(p.DiskID) {
-		return grid.NewNPErr(errDiskNotFound)
-	}
-	return grid.NewNPErr(s.getStorage().RenamePart(context.Background(), p.SrcVolume, p.SrcFilePath, p.DstVolume, p.DstFilePath, p.Meta))
-}
-
-// CleanAbandonedDataHandler - Clean unused data directories.
-func (s *storageRESTServer) CleanAbandonedDataHandler(w http.ResponseWriter, r *http.Request) {
+func (s *storageRESTServer) RenameDataHandler(w http.ResponseWriter, r *http.Request) {
 	if !s.IsValid(w, r) {
 		return
 	}
-	volume := r.Form.Get(storageRESTVolume)
-	filePath := r.Form.Get(storageRESTFilePath)
-	if volume == "" || filePath == "" {
-		return // Ignore
+
+	vars := mux.Vars(r)
+	srcVolume := vars[storageRESTSrcVolume]
+	srcFilePath := vars[storageRESTSrcPath]
+	dstVolume := vars[storageRESTDstVolume]
+	dstFilePath := vars[storageRESTDstPath]
+
+	if r.ContentLength < 0 {
+		s.writeErrorResponse(w, errInvalidArgument)
+		return
 	}
-	keepHTTPResponseAlive(w)(s.getStorage().CleanAbandonedData(r.Context(), volume, filePath))
-}
 
-// closeNotifier is itself a ReadCloser that will notify when either an error occurs or
-// the Close() function is called.
-type closeNotifier struct {
-	rc   io.ReadCloser
-	done chan struct{}
-}
+	var fi FileInfo
+	if err := msgp.Decode(r.Body, &fi); err != nil {
+		s.writeErrorResponse(w, err)
+		return
+	}
 
-func (c *closeNotifier) Read(p []byte) (n int, err error) {
-	n, err = c.rc.Read(p)
+	err := s.storage.RenameData(r.Context(), srcVolume, srcFilePath, fi, dstVolume, dstFilePath)
 	if err != nil {
-		if c.done != nil {
-			xioutil.SafeClose(c.done)
-			c.done = nil
-		}
+		s.writeErrorResponse(w, err)
 	}
-	return n, err
 }
 
-func (c *closeNotifier) Close() error {
-	if c.done != nil {
-		xioutil.SafeClose(c.done)
-		c.done = nil
+// RenameFileHandler - rename a file.
+func (s *storageRESTServer) RenameFileHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.IsValid(w, r) {
+		return
 	}
-	return c.rc.Close()
-}
-
-// keepHTTPReqResponseAlive can be used to avoid timeouts with long storage
-// operations, such as bitrot verification or data usage scanning.
-// Every 10 seconds a space character is sent.
-// keepHTTPReqResponseAlive will wait for the returned body to be read before starting the ticker.
-// The returned function should always be called to release resources.
-// An optional error can be sent which will be picked as text only error,
-// without its original type by the receiver.
-// waitForHTTPResponse should be used to the receiving side.
-func keepHTTPReqResponseAlive(w http.ResponseWriter, r *http.Request) (resp func(error), body io.ReadCloser) {
-	bodyDoneCh := make(chan struct{})
-	doneCh := make(chan error)
-	ctx := r.Context()
-	go func() {
-		canWrite := true
-		write := func(b []byte) {
-			if canWrite {
-				n, err := w.Write(b)
-				if err != nil || n != len(b) {
-					canWrite = false
-				}
-			}
-		}
-		// Wait for body to be read.
-		select {
-		case <-ctx.Done():
-		case <-bodyDoneCh:
-		case err := <-doneCh:
-			if err != nil {
-				write([]byte{1})
-				write([]byte(err.Error()))
-			} else {
-				write([]byte{0})
-			}
-			xioutil.SafeClose(doneCh)
-			return
-		}
-		defer xioutil.SafeClose(doneCh)
-		// Initiate ticker after body has been read.
-		ticker := time.NewTicker(time.Second * 10)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ticker.C:
-				// The done() might have been called
-				// concurrently, check for it before we
-				// write the filler byte.
-				select {
-				case err := <-doneCh:
-					if err != nil {
-						write([]byte{1})
-						write([]byte(err.Error()))
-					} else {
-						write([]byte{0})
-					}
-					return
-				default:
-				}
-
-				// Response not ready, write a filler byte.
-				write([]byte{32})
-				if canWrite {
-					w.(http.Flusher).Flush()
-				}
-			case err := <-doneCh:
-				if err != nil {
-					write([]byte{1})
-					write([]byte(err.Error()))
-				} else {
-					write([]byte{0})
-				}
-				return
-			}
-		}
-	}()
-	return func(err error) {
-		if doneCh == nil {
-			return
-		}
-
-		// Indicate we are ready to write.
-		doneCh <- err
-
-		// Wait for channel to be closed so we don't race on writes.
-		<-doneCh
-
-		// Clear so we can be called multiple times without crashing.
-		doneCh = nil
-	}, &closeNotifier{rc: r.Body, done: bodyDoneCh}
+	vars := mux.Vars(r)
+	srcVolume := vars[storageRESTSrcVolume]
+	srcFilePath := vars[storageRESTSrcPath]
+	dstVolume := vars[storageRESTDstVolume]
+	dstFilePath := vars[storageRESTDstPath]
+	err := s.storage.RenameFile(r.Context(), srcVolume, srcFilePath, dstVolume, dstFilePath)
+	if err != nil {
+		s.writeErrorResponse(w, err)
+	}
 }
 
 // keepHTTPResponseAlive can be used to avoid timeouts with long storage
 // operations, such as bitrot verification or data usage scanning.
-// keepHTTPResponseAlive may NOT be used until the request body has been read,
-// use keepHTTPReqResponseAlive instead.
 // Every 10 seconds a space character is sent.
 // The returned function should always be called to release resources.
 // An optional error can be sent which will be picked as text only error,
@@ -868,48 +707,22 @@ func keepHTTPReqResponseAlive(w http.ResponseWriter, r *http.Request) (resp func
 func keepHTTPResponseAlive(w http.ResponseWriter) func(error) {
 	doneCh := make(chan error)
 	go func() {
-		canWrite := true
-		write := func(b []byte) {
-			if canWrite {
-				n, err := w.Write(b)
-				if err != nil || n != len(b) {
-					canWrite = false
-				}
-			}
-		}
-		defer xioutil.SafeClose(doneCh)
+		defer close(doneCh)
 		ticker := time.NewTicker(time.Second * 10)
-		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				// The done() might have been called
-				// concurrently, check for it before we
-				// write the filler byte.
-				select {
-				case err := <-doneCh:
-					if err != nil {
-						write([]byte{1})
-						write([]byte(err.Error()))
-					} else {
-						write([]byte{0})
-					}
-					return
-				default:
-				}
-
 				// Response not ready, write a filler byte.
-				write([]byte{32})
-				if canWrite {
-					w.(http.Flusher).Flush()
-				}
+				w.Write([]byte{32})
+				w.(http.Flusher).Flush()
 			case err := <-doneCh:
 				if err != nil {
-					write([]byte{1})
-					write([]byte(err.Error()))
+					w.Write([]byte{1})
+					w.Write([]byte(err.Error()))
 				} else {
-					write([]byte{0})
+					w.Write([]byte{0})
 				}
+				ticker.Stop()
 				return
 			}
 		}
@@ -944,7 +757,7 @@ func waitForHTTPResponse(respBody io.Reader) (io.Reader, error) {
 		case 0:
 			return reader, nil
 		case 1:
-			errorText, err := io.ReadAll(reader)
+			errorText, err := ioutil.ReadAll(reader)
 			if err != nil {
 				return nil, err
 			}
@@ -957,6 +770,23 @@ func waitForHTTPResponse(respBody io.Reader) (io.Reader, error) {
 	}
 }
 
+// drainCloser can be used for wrapping an http response.
+// It will drain the body before closing.
+type drainCloser struct {
+	rc io.ReadCloser
+}
+
+// Read forwards the read operation.
+func (f drainCloser) Read(p []byte) (n int, err error) {
+	return f.rc.Read(p)
+}
+
+// Close drains the body and closes the upstream.
+func (f drainCloser) Close() error {
+	xhttp.DrainBody(f.rc)
+	return nil
+}
+
 // httpStreamResponse allows streaming a response, but still send an error.
 type httpStreamResponse struct {
 	done  chan error
@@ -964,7 +794,7 @@ type httpStreamResponse struct {
 	err   error
 }
 
-// Write part of the streaming response.
+// Write part of the the streaming response.
 // Note that upstream errors are currently not forwarded, but may be in the future.
 func (h *httpStreamResponse) Write(b []byte) (int, error) {
 	if len(b) == 0 || h.err != nil {
@@ -1003,62 +833,34 @@ func streamHTTPResponse(w http.ResponseWriter) *httpStreamResponse {
 	blockCh := make(chan []byte)
 	h := httpStreamResponse{done: doneCh, block: blockCh}
 	go func() {
-		canWrite := true
-		write := func(b []byte) {
-			if canWrite {
-				n, err := w.Write(b)
-				if err != nil || n != len(b) {
-					canWrite = false
-				}
-			}
-		}
-
 		ticker := time.NewTicker(time.Second * 10)
-		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
 				// Response not ready, write a filler byte.
-				write([]byte{32})
-				if canWrite {
-					w.(http.Flusher).Flush()
-				}
+				w.Write([]byte{32})
+				w.(http.Flusher).Flush()
 			case err := <-doneCh:
+				ticker.Stop()
+				defer close(doneCh)
 				if err != nil {
-					write([]byte{1})
-					write([]byte(err.Error()))
+					w.Write([]byte{1})
+					w.Write([]byte(err.Error()))
 				} else {
-					write([]byte{0})
+					w.Write([]byte{0})
 				}
-				xioutil.SafeClose(doneCh)
 				return
 			case block := <-blockCh:
 				var tmp [5]byte
 				tmp[0] = 2
 				binary.LittleEndian.PutUint32(tmp[1:], uint32(len(block)))
-				write(tmp[:])
-				write(block)
-				if canWrite {
-					w.(http.Flusher).Flush()
-				}
+				w.Write(tmp[:])
+				w.Write(block)
+				w.(http.Flusher).Flush()
 			}
 		}
 	}()
 	return &h
-}
-
-var poolBuf8k = sync.Pool{
-	New: func() interface{} {
-		b := make([]byte, 8192)
-		return &b
-	},
-}
-
-var poolBuf128k = sync.Pool{
-	New: func() interface{} {
-		b := make([]byte, 128<<10)
-		return b
-	},
 }
 
 // waitForHTTPStream will wait for responses where
@@ -1066,10 +868,6 @@ var poolBuf128k = sync.Pool{
 // The returned reader contains the payload and must be closed if no error is returned.
 func waitForHTTPStream(respBody io.ReadCloser, w io.Writer) error {
 	var tmp [1]byte
-	// 8K copy buffer, reused for less allocs...
-	bufp := poolBuf8k.Get().(*[]byte)
-	buf := *bufp
-	defer poolBuf8k.Put(bufp)
 	for {
 		_, err := io.ReadFull(respBody, tmp[:])
 		if err != nil {
@@ -1079,17 +877,29 @@ func waitForHTTPStream(respBody io.ReadCloser, w io.Writer) error {
 		switch tmp[0] {
 		case 0:
 			// 0 is unbuffered, copy the rest.
-			_, err := io.CopyBuffer(w, respBody, buf)
+			_, err := io.Copy(w, respBody)
+			respBody.Close()
 			if err == io.EOF {
 				return nil
 			}
 			return err
 		case 1:
-			errorText, err := io.ReadAll(respBody)
+			errorText, err := ioutil.ReadAll(respBody)
 			if err != nil {
 				return err
 			}
+			respBody.Close()
 			return errors.New(string(errorText))
+		case 3:
+			// gob style is already deprecated, we can remove this when
+			// storage API version will be greater or equal to 23.
+			defer respBody.Close()
+			dec := gob.NewDecoder(respBody)
+			var err error
+			if de := dec.Decode(&err); de == nil {
+				return err
+			}
+			return errors.New("rpc error")
 		case 2:
 			// Block of data
 			var tmp [4]byte
@@ -1098,20 +908,23 @@ func waitForHTTPStream(respBody io.ReadCloser, w io.Writer) error {
 				return err
 			}
 			length := binary.LittleEndian.Uint32(tmp[:])
-			n, err := io.CopyBuffer(w, io.LimitReader(respBody, int64(length)), buf)
+			_, err = io.CopyN(w, respBody, int64(length))
 			if err != nil {
 				return err
-			}
-			if n != int64(length) {
-				return io.ErrUnexpectedEOF
 			}
 			continue
 		case 32:
 			continue
 		default:
+			go xhttp.DrainBody(respBody)
 			return fmt.Errorf("unexpected filler byte: %d", tmp[0])
 		}
 	}
+}
+
+// VerifyFileResp - VerifyFile()'s response.
+type VerifyFileResp struct {
+	Err error
 }
 
 // VerifyFileHandler - Verify all part of file for bitrot errors.
@@ -1119,8 +932,9 @@ func (s *storageRESTServer) VerifyFileHandler(w http.ResponseWriter, r *http.Req
 	if !s.IsValid(w, r) {
 		return
 	}
-	volume := r.Form.Get(storageRESTVolume)
-	filePath := r.Form.Get(storageRESTFilePath)
+	vars := mux.Vars(r)
+	volume := vars[storageRESTVolume]
+	filePath := vars[storageRESTFilePath]
 
 	if r.ContentLength < 0 {
 		s.writeErrorResponse(w, errInvalidArgument)
@@ -1133,46 +947,17 @@ func (s *storageRESTServer) VerifyFileHandler(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	setEventStreamHeaders(w)
+	encoder := gob.NewEncoder(w)
 	done := keepHTTPResponseAlive(w)
-	resp, err := s.getStorage().VerifyFile(r.Context(), volume, filePath, fi)
-	done(err)
+	err := s.storage.VerifyFile(r.Context(), volume, filePath, fi)
+	done(nil)
+	vresp := &VerifyFileResp{}
 	if err != nil {
-		return
+		vresp.Err = StorageErr(err.Error())
 	}
-
-	buf, _ := resp.MarshalMsg(nil)
-	w.Write(buf)
-}
-
-func checkDiskFatalErrs(errs []error) error {
-	// This returns a common error if all errors are
-	// same errors, then there is no point starting
-	// the server.
-	if countErrs(errs, errUnsupportedDisk) == len(errs) {
-		return errUnsupportedDisk
-	}
-
-	if countErrs(errs, errDiskAccessDenied) == len(errs) {
-		return errDiskAccessDenied
-	}
-
-	if countErrs(errs, errFileAccessDenied) == len(errs) {
-		return errDiskAccessDenied
-	}
-
-	if countErrs(errs, errDiskNotDir) == len(errs) {
-		return errDiskNotDir
-	}
-
-	if countErrs(errs, errFaultyDisk) == len(errs) {
-		return errFaultyDisk
-	}
-
-	if countErrs(errs, errXLBackend) == len(errs) {
-		return errXLBackend
-	}
-
-	return nil
+	encoder.Encode(vresp)
+	w.(http.Flusher).Flush()
 }
 
 // A single function to write certain errors to be fatal
@@ -1180,29 +965,28 @@ func checkDiskFatalErrs(errs []error) error {
 // at each implementation of error for added hints.
 //
 // FIXME: This is an unusual function but serves its purpose for
-// now, need to revisit the overall erroring structure here.
+// now, need to revist the overall erroring structure here.
 // Do not like it :-(
 func logFatalErrs(err error, endpoint Endpoint, exit bool) {
-	switch {
-	case errors.Is(err, errXLBackend):
-		logger.Fatal(config.ErrInvalidXLValue(err), "Unable to initialize backend")
-	case errors.Is(err, errUnsupportedDisk):
+	if errors.Is(err, errMinDiskSize) {
+		logger.Fatal(config.ErrUnableToWriteInBackend(err).Hint(err.Error()), "Unable to initialize backend")
+	} else if errors.Is(err, errUnsupportedDisk) {
 		var hint string
 		if endpoint.URL != nil {
-			hint = fmt.Sprintf("Drive '%s' does not support O_DIRECT flags, MinIO erasure coding requires filesystems with O_DIRECT support", endpoint.Path)
+			hint = fmt.Sprintf("Disk '%s' does not support O_DIRECT flags, MinIO erasure coding requires filesystems with O_DIRECT support", endpoint.Path)
 		} else {
-			hint = "Drives do not support O_DIRECT flags, MinIO erasure coding requires filesystems with O_DIRECT support"
+			hint = "Disks do not support O_DIRECT flags, MinIO erasure coding requires filesystems with O_DIRECT support"
 		}
-		logger.Fatal(config.ErrUnsupportedBackend(err).Hint("%s", hint), "Unable to initialize backend")
-	case errors.Is(err, errDiskNotDir):
+		logger.Fatal(config.ErrUnsupportedBackend(err).Hint(hint), "Unable to initialize backend")
+	} else if errors.Is(err, errDiskNotDir) {
 		var hint string
 		if endpoint.URL != nil {
-			hint = fmt.Sprintf("Drive '%s' is not a directory, MinIO erasure coding needs a directory", endpoint.Path)
+			hint = fmt.Sprintf("Disk '%s' is not a directory, MinIO erasure coding needs a directory", endpoint.Path)
 		} else {
-			hint = "Drives are not directories, MinIO erasure coding needs directories"
+			hint = "Disks are not directories, MinIO erasure coding needs directories"
 		}
-		logger.Fatal(config.ErrUnableToWriteInBackend(err).Hint("%s", hint), "Unable to initialize backend")
-	case errors.Is(err, errDiskAccessDenied):
+		logger.Fatal(config.ErrUnableToWriteInBackend(err).Hint(hint), "Unable to initialize backend")
+	} else if errors.Is(err, errFileAccessDenied) {
 		// Show a descriptive error with a hint about how to fix it.
 		var username string
 		if u, err := user.Current(); err == nil {
@@ -1217,224 +1001,98 @@ func logFatalErrs(err error, endpoint Endpoint, exit bool) {
 		} else {
 			hint = fmt.Sprintf("Run the following command to add write permissions: `sudo chown -R %s. <path> && sudo chmod u+rxw <path>`", username)
 		}
+		logger.Fatal(config.ErrUnableToWriteInBackend(err).Hint(hint), "Unable to initialize backend")
+	} else if errors.Is(err, errFaultyDisk) {
 		if !exit {
-			storageLogOnceIf(GlobalContext, fmt.Errorf("Drive is not writable %s, %s", endpoint, hint), "log-fatal-errs")
-		} else {
-			logger.Fatal(config.ErrUnableToWriteInBackend(err).Hint("%s", hint), "Unable to initialize backend")
-		}
-	case errors.Is(err, errFaultyDisk):
-		if !exit {
-			storageLogOnceIf(GlobalContext, fmt.Errorf("Drive is faulty at %s, please replace the drive - drive will be offline", endpoint), "log-fatal-errs")
+			logger.LogIf(GlobalContext, fmt.Errorf("disk is faulty at %s, please replace the drive - disk will be offline", endpoint))
 		} else {
 			logger.Fatal(err, "Unable to initialize backend")
 		}
-	case errors.Is(err, errDiskFull):
+	} else if errors.Is(err, errDiskFull) {
 		if !exit {
-			storageLogOnceIf(GlobalContext, fmt.Errorf("Drive is already full at %s, incoming I/O will fail - drive will be offline", endpoint), "log-fatal-errs")
+			logger.LogIf(GlobalContext, fmt.Errorf("disk is already full at %s, incoming I/O will fail - disk will be offline", endpoint))
 		} else {
 			logger.Fatal(err, "Unable to initialize backend")
 		}
-	case errors.Is(err, errInconsistentDisk):
-		if exit {
-			logger.Fatal(err, "Unable to initialize backend")
-		}
-	default:
+	} else {
 		if !exit {
-			storageLogOnceIf(GlobalContext, fmt.Errorf("Drive %s returned an unexpected error: %w, please investigate - drive will be offline", endpoint, err), "log-fatal-errs")
+			logger.LogIf(GlobalContext, fmt.Errorf("disk returned an unexpected error at %s, please investigate - disk will be offline", endpoint))
 		} else {
 			logger.Fatal(err, "Unable to initialize backend")
 		}
 	}
 }
 
-// StatInfoFile returns file stat info.
-func (s *storageRESTServer) StatInfoFile(w http.ResponseWriter, r *http.Request) {
-	if !s.IsValid(w, r) {
-		return
-	}
-	volume := r.Form.Get(storageRESTVolume)
-	filePath := r.Form.Get(storageRESTFilePath)
-	glob := r.Form.Get(storageRESTGlob)
-	done := keepHTTPResponseAlive(w)
-	stats, err := s.getStorage().StatInfoFile(r.Context(), volume, filePath, glob == "true")
-	done(err)
-	if err != nil {
-		return
-	}
-	for _, si := range stats {
-		msgp.Encode(w, &si)
-	}
-}
-
-func (s *storageRESTServer) DeleteBulkHandler(w http.ResponseWriter, r *http.Request) {
-	if !s.IsValid(w, r) {
-		return
-	}
-
-	var req DeleteBulkReq
-	mr := msgpNewReader(r.Body)
-	defer readMsgpReaderPoolPut(mr)
-
-	if err := req.DecodeMsg(mr); err != nil {
-		s.writeErrorResponse(w, err)
-		return
-	}
-
-	volume := r.Form.Get(storageRESTVolume)
-	keepHTTPResponseAlive(w)(s.getStorage().DeleteBulk(r.Context(), volume, req.Paths...))
-}
-
-// ReadMultiple returns multiple files
-func (s *storageRESTServer) ReadMultiple(w http.ResponseWriter, r *http.Request) {
-	if !s.IsValid(w, r) {
-		return
-	}
-	rw := streamHTTPResponse(w)
-	defer func() {
-		if r := recover(); r != nil {
-			debug.PrintStack()
-			rw.CloseWithError(fmt.Errorf("panic: %v", r))
-		}
-	}()
-
-	var req ReadMultipleReq
-	mr := msgpNewReader(r.Body)
-	defer readMsgpReaderPoolPut(mr)
-	err := req.DecodeMsg(mr)
-	if err != nil {
-		rw.CloseWithError(err)
-		return
-	}
-
-	mw := msgp.NewWriter(rw)
-	responses := make(chan ReadMultipleResp, len(req.Files))
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for resp := range responses {
-			err := resp.EncodeMsg(mw)
-			if err != nil {
-				rw.CloseWithError(err)
-				return
-			}
-			mw.Flush()
-		}
-	}()
-	err = s.getStorage().ReadMultiple(r.Context(), req, responses)
-	wg.Wait()
-	rw.CloseWithError(err)
-}
-
-// globalLocalSetDrives is used for local drive as well as remote REST
-// API caller for other nodes to talk to this node.
-//
-// Any updates to this must be serialized via globalLocalDrivesMu (locker)
-var globalLocalSetDrives [][][]StorageAPI
-
-// registerStorageRESTHandlers - register storage rpc router.
-func registerStorageRESTHandlers(router *mux.Router, endpointServerPools EndpointServerPools, gm *grid.Manager) {
-	h := func(f http.HandlerFunc) http.HandlerFunc {
-		return collectInternodeStats(httpTraceHdrs(f))
-	}
-
-	globalLocalDrivesMap = make(map[string]StorageAPI)
-	globalLocalSetDrives = make([][][]StorageAPI, len(endpointServerPools))
-	for pool := range globalLocalSetDrives {
-		globalLocalSetDrives[pool] = make([][]StorageAPI, endpointServerPools[pool].SetCount)
-		for set := range globalLocalSetDrives[pool] {
-			globalLocalSetDrives[pool][set] = make([]StorageAPI, endpointServerPools[pool].DrivesPerSet)
-		}
-	}
-	for _, serverPool := range endpointServerPools {
-		for _, endpoint := range serverPool.Endpoints {
+// registerStorageRPCRouter - register storage rpc router.
+func registerStorageRESTHandlers(router *mux.Router, endpointServerPools EndpointServerPools) {
+	for _, ep := range endpointServerPools {
+		for _, endpoint := range ep.Endpoints {
 			if !endpoint.IsLocal {
 				continue
 			}
-
-			server := &storageRESTServer{
-				endpoint: endpoint,
+			storage, err := newXLStorage(endpoint)
+			if err != nil {
+				// if supported errors don't fail, we proceed to
+				// printing message and moving forward.
+				logFatalErrs(err, endpoint, false)
 			}
+
+			server := &storageRESTServer{storage: storage}
 
 			subrouter := router.PathPrefix(path.Join(storageRESTPrefix, endpoint.Path)).Subrouter()
 
-			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodHealth).HandlerFunc(h(server.HealthHandler))
-			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodAppendFile).HandlerFunc(h(server.AppendFileHandler))
-			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodCreateFile).HandlerFunc(h(server.CreateFileHandler))
-			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodDeleteVersions).HandlerFunc(h(server.DeleteVersionsHandler))
-			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodVerifyFile).HandlerFunc(h(server.VerifyFileHandler))
-			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodStatInfoFile).HandlerFunc(h(server.StatInfoFile))
-			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodReadMultiple).HandlerFunc(h(server.ReadMultiple))
-			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodCleanAbandoned).HandlerFunc(h(server.CleanAbandonedDataHandler))
-			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodDeleteBulk).HandlerFunc(h(server.DeleteBulkHandler))
-			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodReadParts).HandlerFunc(h(server.ReadPartsHandler))
+			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodHealth).HandlerFunc(httpTraceHdrs(server.HealthHandler))
+			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodDiskInfo).HandlerFunc(httpTraceHdrs(server.DiskInfoHandler))
+			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodNSScanner).HandlerFunc(httpTraceHdrs(server.NSScannerHandler))
+			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodMakeVol).HandlerFunc(httpTraceHdrs(server.MakeVolHandler)).Queries(restQueries(storageRESTVolume)...)
+			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodMakeVolBulk).HandlerFunc(httpTraceHdrs(server.MakeVolBulkHandler)).Queries(restQueries(storageRESTVolumes)...)
+			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodStatVol).HandlerFunc(httpTraceHdrs(server.StatVolHandler)).Queries(restQueries(storageRESTVolume)...)
+			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodDeleteVol).HandlerFunc(httpTraceHdrs(server.DeleteVolHandler)).Queries(restQueries(storageRESTVolume)...)
+			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodListVols).HandlerFunc(httpTraceHdrs(server.ListVolsHandler))
 
-			subrouter.Methods(http.MethodGet).Path(storageRESTVersionPrefix + storageRESTMethodReadFileStream).HandlerFunc(h(server.ReadFileStreamHandler))
-			subrouter.Methods(http.MethodGet).Path(storageRESTVersionPrefix + storageRESTMethodReadVersion).HandlerFunc(h(server.ReadVersionHandler))
-			subrouter.Methods(http.MethodGet).Path(storageRESTVersionPrefix + storageRESTMethodReadXL).HandlerFunc(h(server.ReadXLHandler))
-			subrouter.Methods(http.MethodGet).Path(storageRESTVersionPrefix + storageRESTMethodReadFile).HandlerFunc(h(server.ReadFileHandler))
+			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodAppendFile).HandlerFunc(httpTraceHdrs(server.AppendFileHandler)).
+				Queries(restQueries(storageRESTVolume, storageRESTFilePath)...)
+			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodWriteAll).HandlerFunc(httpTraceHdrs(server.WriteAllHandler)).
+				Queries(restQueries(storageRESTVolume, storageRESTFilePath)...)
+			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodWriteMetadata).HandlerFunc(httpTraceHdrs(server.WriteMetadataHandler)).
+				Queries(restQueries(storageRESTVolume, storageRESTFilePath)...)
+			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodUpdateMetadata).HandlerFunc(httpTraceHdrs(server.UpdateMetadataHandler)).
+				Queries(restQueries(storageRESTVolume, storageRESTFilePath)...)
+			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodDeleteVersion).HandlerFunc(httpTraceHdrs(server.DeleteVersionHandler)).
+				Queries(restQueries(storageRESTVolume, storageRESTFilePath, storageRESTForceDelMarker)...)
+			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodReadVersion).HandlerFunc(httpTraceHdrs(server.ReadVersionHandler)).
+				Queries(restQueries(storageRESTVolume, storageRESTFilePath, storageRESTVersionID, storageRESTReadData)...)
+			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodRenameData).HandlerFunc(httpTraceHdrs(server.RenameDataHandler)).
+				Queries(restQueries(storageRESTSrcVolume, storageRESTSrcPath,
+					storageRESTDstVolume, storageRESTDstPath)...)
+			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodCreateFile).HandlerFunc(httpTraceHdrs(server.CreateFileHandler)).
+				Queries(restQueries(storageRESTVolume, storageRESTFilePath, storageRESTLength)...)
 
-			logger.FatalIf(storageListDirRPC.RegisterNoInput(gm, server.ListDirHandler, endpoint.Path), "unable to register handler")
-			logger.FatalIf(storageReadAllRPC.Register(gm, server.ReadAllHandler, endpoint.Path), "unable to register handler")
-			logger.FatalIf(storageWriteAllRPC.Register(gm, server.WriteAllHandler, endpoint.Path), "unable to register handler")
-			logger.FatalIf(storageRenameFileRPC.Register(gm, server.RenameFileHandler, endpoint.Path), "unable to register handler")
-			logger.FatalIf(storageRenamePartRPC.Register(gm, server.RenamePartHandler, endpoint.Path), "unable to register handler")
-			logger.FatalIf(storageRenameDataRPC.Register(gm, server.RenameDataHandler, endpoint.Path), "unable to register handler")
-			logger.FatalIf(storageRenameDataInlineRPC.Register(gm, server.RenameDataInlineHandler, endpoint.Path), "unable to register handler")
-			logger.FatalIf(storageDeleteFileRPC.Register(gm, server.DeleteFileHandler, endpoint.Path), "unable to register handler")
-			logger.FatalIf(storageCheckPartsRPC.Register(gm, server.CheckPartsHandler, endpoint.Path), "unable to register handler")
-			logger.FatalIf(storageReadVersionRPC.Register(gm, server.ReadVersionHandlerWS, endpoint.Path), "unable to register handler")
-			logger.FatalIf(storageWriteMetadataRPC.Register(gm, server.WriteMetadataHandler, endpoint.Path), "unable to register handler")
-			logger.FatalIf(storageUpdateMetadataRPC.Register(gm, server.UpdateMetadataHandler, endpoint.Path), "unable to register handler")
-			logger.FatalIf(storageDeleteVersionRPC.Register(gm, server.DeleteVersionHandler, endpoint.Path), "unable to register handler")
-			logger.FatalIf(storageReadXLRPC.Register(gm, server.ReadXLHandlerWS, endpoint.Path), "unable to register handler")
-			logger.FatalIf(storageNSScannerRPC.RegisterNoInput(gm, server.NSScannerHandler, endpoint.Path), "unable to register handler")
-			logger.FatalIf(storageDiskInfoRPC.Register(gm, server.DiskInfoHandler, endpoint.Path), "unable to register handler")
-			logger.FatalIf(storageStatVolRPC.Register(gm, server.StatVolHandler, endpoint.Path), "unable to register handler")
-			logger.FatalIf(gm.RegisterStreamingHandler(grid.HandlerWalkDir, grid.StreamHandler{
-				Subroute:    endpoint.Path,
-				Handle:      server.WalkDirHandler,
-				OutCapacity: 1,
-			}), "unable to register handler")
+			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodCheckFile).HandlerFunc(httpTraceHdrs(server.CheckFileHandler)).
+				Queries(restQueries(storageRESTVolume, storageRESTFilePath)...)
+			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodCheckParts).HandlerFunc(httpTraceHdrs(server.CheckPartsHandler)).
+				Queries(restQueries(storageRESTVolume, storageRESTFilePath)...)
 
-			createStorage := func(endpoint Endpoint) bool {
-				xl, err := newXLStorage(endpoint, false)
-				if err != nil {
-					// if supported errors don't fail, we proceed to
-					// printing message and moving forward.
-					if errors.Is(err, errDriveIsRoot) {
-						err = fmt.Errorf("major: %v: minor: %v: %w", xl.major, xl.minor, err)
-					}
-					logFatalErrs(err, endpoint, false)
-					return false
-				}
-				storage := newXLStorageDiskIDCheck(xl, true)
-				storage.SetDiskID(xl.diskID)
-				// We do not have to do SetFormatData() since 'xl'
-				// already captures formatData cached.
+			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodReadAll).HandlerFunc(httpTraceHdrs(server.ReadAllHandler)).
+				Queries(restQueries(storageRESTVolume, storageRESTFilePath)...)
+			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodReadFile).HandlerFunc(httpTraceHdrs(server.ReadFileHandler)).
+				Queries(restQueries(storageRESTVolume, storageRESTFilePath, storageRESTOffset, storageRESTLength, storageRESTBitrotAlgo, storageRESTBitrotHash)...)
+			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodReadFileStream).HandlerFunc(httpTraceHdrs(server.ReadFileStreamHandler)).
+				Queries(restQueries(storageRESTVolume, storageRESTFilePath, storageRESTOffset, storageRESTLength)...)
+			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodListDir).HandlerFunc(httpTraceHdrs(server.ListDirHandler)).
+				Queries(restQueries(storageRESTVolume, storageRESTDirPath, storageRESTCount)...)
 
-				globalLocalDrivesMu.Lock()
-				defer globalLocalDrivesMu.Unlock()
+			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodDeleteVersions).HandlerFunc(httpTraceHdrs(server.DeleteVersionsHandler)).
+				Queries(restQueries(storageRESTVolume, storageRESTTotalVersions)...)
+			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodDeleteFile).HandlerFunc(httpTraceHdrs(server.DeleteFileHandler)).
+				Queries(restQueries(storageRESTVolume, storageRESTFilePath, storageRESTRecursive)...)
 
-				globalLocalDrivesMap[endpoint.String()] = storage
-				globalLocalSetDrives[endpoint.PoolIdx][endpoint.SetIdx][endpoint.DiskIdx] = storage
-				return true
-			}
-
-			if createStorage(endpoint) {
-				continue
-			}
-
-			// Start async goroutine to create storage.
-			go func(endpoint Endpoint) {
-				for {
-					time.Sleep(3 * time.Second)
-					if createStorage(endpoint) {
-						return
-					}
-				}
-			}(endpoint)
-
+			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodRenameFile).HandlerFunc(httpTraceHdrs(server.RenameFileHandler)).
+				Queries(restQueries(storageRESTSrcVolume, storageRESTSrcPath, storageRESTDstVolume, storageRESTDstPath)...)
+			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodVerifyFile).HandlerFunc(httpTraceHdrs(server.VerifyFileHandler)).
+				Queries(restQueries(storageRESTVolume, storageRESTFilePath)...)
+			subrouter.Methods(http.MethodPost).Path(storageRESTVersionPrefix + storageRESTMethodWalkDir).HandlerFunc(httpTraceHdrs(server.WalkDirHandler)).
+				Queries(restQueries(storageRESTVolume, storageRESTDirPath, storageRESTRecursive)...)
 		}
 	}
 }

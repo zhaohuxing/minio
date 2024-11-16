@@ -1,19 +1,18 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2016-2020 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
@@ -66,31 +65,35 @@ func TestErasureHeal(t *testing.T) {
 	for i, test := range erasureHealTests {
 		if test.offDisks < test.badStaleDisks {
 			// test case sanity check
-			t.Fatalf("Test %d: Bad test case - number of stale drives cannot be less than number of badstale drives", i)
+			t.Fatalf("Test %d: Bad test case - number of stale disks cannot be less than number of badstale disks", i)
 		}
 
 		// create some test data
-		setup, err := newErasureTestSetup(t, test.dataBlocks, test.disks-test.dataBlocks, test.blocksize)
+		setup, err := newErasureTestSetup(test.dataBlocks, test.disks-test.dataBlocks, test.blocksize)
 		if err != nil {
 			t.Fatalf("Test %d: failed to setup Erasure environment: %v", i, err)
 		}
 		disks := setup.disks
 		erasure, err := NewErasure(context.Background(), test.dataBlocks, test.disks-test.dataBlocks, test.blocksize)
 		if err != nil {
+			setup.Remove()
 			t.Fatalf("Test %d: failed to create ErasureStorage: %v", i, err)
 		}
 		data := make([]byte, test.size)
 		if _, err = io.ReadFull(rand.Reader, data); err != nil {
+			setup.Remove()
 			t.Fatalf("Test %d: failed to create random test data: %v", i, err)
 		}
 		buffer := make([]byte, test.blocksize, 2*test.blocksize)
 		writers := make([]io.Writer, len(disks))
 		for i, disk := range disks {
-			writers[i] = newBitrotWriter(disk, "", "testbucket", "testobject", erasure.ShardFileSize(test.size), test.algorithm, erasure.ShardSize())
+			writers[i] = newBitrotWriter(disk, "testbucket", "testobject",
+				erasure.ShardFileSize(test.size), test.algorithm, erasure.ShardSize(), true)
 		}
 		_, err = erasure.Encode(context.Background(), bytes.NewReader(data), writers, buffer, erasure.dataBlocks+1)
 		closeBitrotWriters(writers)
 		if err != nil {
+			setup.Remove()
 			t.Fatalf("Test %d: failed to create random test data: %v", i, err)
 		}
 
@@ -128,11 +131,12 @@ func TestErasureHeal(t *testing.T) {
 				continue
 			}
 			os.Remove(pathJoin(disk.String(), "testbucket", "testobject"))
-			staleWriters[i] = newBitrotWriter(disk, "", "testbucket", "testobject", erasure.ShardFileSize(test.size), test.algorithm, erasure.ShardSize())
+			staleWriters[i] = newBitrotWriter(disk, "testbucket", "testobject",
+				erasure.ShardFileSize(test.size), test.algorithm, erasure.ShardSize(), true)
 		}
 
 		// test case setup is complete - now call Heal()
-		err = erasure.Heal(context.Background(), staleWriters, readers, test.size, nil)
+		err = erasure.Heal(context.Background(), readers, staleWriters, test.size)
 		closeBitrotReaders(readers)
 		closeBitrotWriters(staleWriters)
 		if err != nil && !test.shouldFail {
@@ -153,5 +157,6 @@ func TestErasureHeal(t *testing.T) {
 				}
 			}
 		}
+		setup.Remove()
 	}
 }

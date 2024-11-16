@@ -1,19 +1,18 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2015, 2016, 2017, 2018 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
@@ -22,47 +21,37 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 )
 
 // Converts underlying storage error. Convenience function written to
 // handle all cases where we have known types of errors returned by
 // underlying storage layer.
-func toObjectErr(oerr error, params ...string) error {
-	if oerr == nil {
-		return nil
-	}
-
-	// Unwarp the error first
-	err := unwrapAll(oerr)
-
-	if err == context.Canceled {
-		return context.Canceled
-	}
-
-	switch err.Error() {
-	case errVolumeNotFound.Error():
+func toObjectErr(err error, params ...string) error {
+	switch err {
+	case errVolumeNotFound:
 		apiErr := BucketNotFound{}
 		if len(params) >= 1 {
 			apiErr.Bucket = params[0]
 		}
 		return apiErr
-	case errVolumeNotEmpty.Error():
+	case errVolumeNotEmpty:
 		apiErr := BucketNotEmpty{}
 		if len(params) >= 1 {
 			apiErr.Bucket = params[0]
 		}
 		return apiErr
-	case errVolumeExists.Error():
+	case errVolumeExists:
 		apiErr := BucketExists{}
 		if len(params) >= 1 {
 			apiErr.Bucket = params[0]
 		}
 		return apiErr
-	case errDiskFull.Error():
+	case errDiskFull:
 		return StorageFull{}
-	case errTooManyOpenFiles.Error():
+	case errTooManyOpenFiles:
 		return SlowDown{}
-	case errFileAccessDenied.Error():
+	case errFileAccessDenied:
 		apiErr := PrefixAccessDenied{}
 		if len(params) >= 1 {
 			apiErr.Bucket = params[0]
@@ -71,7 +60,16 @@ func toObjectErr(oerr error, params ...string) error {
 			apiErr.Object = decodeDirObject(params[1])
 		}
 		return apiErr
-	case errIsNotRegular.Error():
+	case errFileParentIsFile:
+		apiErr := ParentIsObject{}
+		if len(params) >= 1 {
+			apiErr.Bucket = params[0]
+		}
+		if len(params) >= 2 {
+			apiErr.Object = decodeDirObject(params[1])
+		}
+		return apiErr
+	case errIsNotRegular:
 		apiErr := ObjectExistsAsDirectory{}
 		if len(params) >= 1 {
 			apiErr.Bucket = params[0]
@@ -80,7 +78,7 @@ func toObjectErr(oerr error, params ...string) error {
 			apiErr.Object = decodeDirObject(params[1])
 		}
 		return apiErr
-	case errFileVersionNotFound.Error():
+	case errFileVersionNotFound:
 		apiErr := VersionNotFound{}
 		if len(params) >= 1 {
 			apiErr.Bucket = params[0]
@@ -92,7 +90,7 @@ func toObjectErr(oerr error, params ...string) error {
 			apiErr.VersionID = params[2]
 		}
 		return apiErr
-	case errMethodNotAllowed.Error():
+	case errMethodNotAllowed:
 		apiErr := MethodNotAllowed{}
 		if len(params) >= 1 {
 			apiErr.Bucket = params[0]
@@ -101,7 +99,7 @@ func toObjectErr(oerr error, params ...string) error {
 			apiErr.Object = decodeDirObject(params[1])
 		}
 		return apiErr
-	case errFileNotFound.Error():
+	case errFileNotFound:
 		apiErr := ObjectNotFound{}
 		if len(params) >= 1 {
 			apiErr.Bucket = params[0]
@@ -110,7 +108,7 @@ func toObjectErr(oerr error, params ...string) error {
 			apiErr.Object = decodeDirObject(params[1])
 		}
 		return apiErr
-	case errUploadIDNotFound.Error():
+	case errUploadIDNotFound:
 		apiErr := InvalidUploadID{}
 		if len(params) >= 1 {
 			apiErr.Bucket = params[0]
@@ -122,7 +120,7 @@ func toObjectErr(oerr error, params ...string) error {
 			apiErr.UploadID = params[2]
 		}
 		return apiErr
-	case errFileNameTooLong.Error():
+	case errFileNameTooLong:
 		apiErr := ObjectNameInvalid{}
 		if len(params) >= 1 {
 			apiErr.Bucket = params[0]
@@ -131,7 +129,7 @@ func toObjectErr(oerr error, params ...string) error {
 			apiErr.Object = decodeDirObject(params[1])
 		}
 		return apiErr
-	case errDataTooLarge.Error():
+	case errDataTooLarge:
 		apiErr := ObjectTooLarge{}
 		if len(params) >= 1 {
 			apiErr.Bucket = params[0]
@@ -140,7 +138,7 @@ func toObjectErr(oerr error, params ...string) error {
 			apiErr.Object = decodeDirObject(params[1])
 		}
 		return apiErr
-	case errDataTooSmall.Error():
+	case errDataTooSmall:
 		apiErr := ObjectTooSmall{}
 		if len(params) >= 1 {
 			apiErr.Bucket = params[0]
@@ -149,7 +147,7 @@ func toObjectErr(oerr error, params ...string) error {
 			apiErr.Object = decodeDirObject(params[1])
 		}
 		return apiErr
-	case errErasureReadQuorum.Error():
+	case errErasureReadQuorum:
 		apiErr := InsufficientReadQuorum{}
 		if len(params) >= 1 {
 			apiErr.Bucket = params[0]
@@ -157,11 +155,8 @@ func toObjectErr(oerr error, params ...string) error {
 		if len(params) >= 2 {
 			apiErr.Object = decodeDirObject(params[1])
 		}
-		if v, ok := oerr.(InsufficientReadQuorum); ok {
-			apiErr.Type = v.Type
-		}
 		return apiErr
-	case errErasureWriteQuorum.Error():
+	case errErasureWriteQuorum:
 		apiErr := InsufficientWriteQuorum{}
 		if len(params) >= 1 {
 			apiErr.Bucket = params[0]
@@ -170,15 +165,10 @@ func toObjectErr(oerr error, params ...string) error {
 			apiErr.Object = decodeDirObject(params[1])
 		}
 		return apiErr
-	case io.ErrUnexpectedEOF.Error(), io.ErrShortWrite.Error(), context.Canceled.Error(), context.DeadlineExceeded.Error():
-		apiErr := IncompleteBody{}
-		if len(params) >= 1 {
-			apiErr.Bucket = params[0]
-		}
-		if len(params) >= 2 {
-			apiErr.Object = decodeDirObject(params[1])
-		}
-		return apiErr
+	case io.ErrUnexpectedEOF, io.ErrShortWrite:
+		return IncompleteBody{}
+	case context.Canceled, context.DeadlineExceeded:
+		return IncompleteBody{}
 	}
 	return err
 }
@@ -194,7 +184,7 @@ func (e SignatureDoesNotMatch) Error() string {
 type StorageFull struct{}
 
 func (e StorageFull) Error() string {
-	return "Storage reached its minimum free drive threshold."
+	return "Storage reached its minimum free disk threshold."
 }
 
 // SlowDown  too many file descriptors open or backend busy .
@@ -204,34 +194,8 @@ func (e SlowDown) Error() string {
 	return "Please reduce your request rate"
 }
 
-// RQErrType reason for read quorum error.
-type RQErrType int
-
-const (
-	// RQInsufficientOnlineDrives - not enough online drives.
-	RQInsufficientOnlineDrives RQErrType = 1 << iota
-	// RQInconsistentMeta - inconsistent metadata.
-	RQInconsistentMeta
-)
-
-func (t RQErrType) String() string {
-	switch t {
-	case RQInsufficientOnlineDrives:
-		return "InsufficientOnlineDrives"
-	case RQInconsistentMeta:
-		return "InconsistentMeta"
-	default:
-		return "Unknown"
-	}
-}
-
 // InsufficientReadQuorum storage cannot satisfy quorum for read operation.
-type InsufficientReadQuorum struct {
-	Bucket string
-	Object string
-	Err    error
-	Type   RQErrType
-}
+type InsufficientReadQuorum GenericError
 
 func (e InsufficientReadQuorum) Error() string {
 	return "Storage resources are insufficient for the read operation " + e.Bucket + "/" + e.Object
@@ -333,13 +297,6 @@ func (e MethodNotAllowed) Error() string {
 	return "Method not allowed: " + e.Bucket + "/" + e.Object
 }
 
-// ObjectLocked object is currently WORM protected.
-type ObjectLocked GenericError
-
-func (e ObjectLocked) Error() string {
-	return "Object is WORM protected and cannot be overwritten: " + e.Bucket + "/" + e.Object + "(" + e.VersionID + ")"
-}
-
 // ObjectAlreadyExists object already exists.
 type ObjectAlreadyExists GenericError
 
@@ -354,11 +311,18 @@ func (e ObjectExistsAsDirectory) Error() string {
 	return "Object exists on : " + e.Bucket + " as directory " + e.Object
 }
 
-// PrefixAccessDenied object access is denied.
+//PrefixAccessDenied object access is denied.
 type PrefixAccessDenied GenericError
 
 func (e PrefixAccessDenied) Error() string {
 	return "Prefix access is denied: " + e.Bucket + SlashSeparator + e.Object
+}
+
+// ParentIsObject object access is denied.
+type ParentIsObject GenericError
+
+func (e ParentIsObject) Error() string {
+	return "Parent is object " + e.Bucket + SlashSeparator + path.Dir(e.Object)
 }
 
 // BucketExists bucket exists.
@@ -375,6 +339,15 @@ type InvalidUploadIDKeyCombination struct {
 
 func (e InvalidUploadIDKeyCombination) Error() string {
 	return fmt.Sprintf("Invalid combination of uploadID marker '%s' and marker '%s'", e.UploadIDMarker, e.KeyMarker)
+}
+
+// InvalidMarkerPrefixCombination - invalid marker and prefix combination.
+type InvalidMarkerPrefixCombination struct {
+	Marker, Prefix string
+}
+
+func (e InvalidMarkerPrefixCombination) Error() string {
+	return fmt.Sprintf("Invalid combination of marker '%s' and prefix '%s'", e.Marker, e.Prefix)
 }
 
 // BucketPolicyNotFound - no bucket policy found.
@@ -440,6 +413,13 @@ func (e BucketRemoteDestinationNotFound) Error() string {
 	return "Destination bucket does not exist: " + e.Bucket
 }
 
+// BucketReplicationDestinationMissingLock bucket does not have object lock enabled.
+type BucketReplicationDestinationMissingLock GenericError
+
+func (e BucketReplicationDestinationMissingLock) Error() string {
+	return "Destination bucket does not have object lock enabled: " + e.Bucket
+}
+
 // BucketRemoteTargetNotFound remote target does not exist.
 type BucketRemoteTargetNotFound GenericError
 
@@ -447,29 +427,11 @@ func (e BucketRemoteTargetNotFound) Error() string {
 	return "Remote target not found: " + e.Bucket
 }
 
-// RemoteTargetConnectionErr remote target connection failure.
-type RemoteTargetConnectionErr struct {
-	Err       error
-	Bucket    string
-	Endpoint  string
-	AccessKey string
-}
+// BucketRemoteConnectionErr remote target connection failure.
+type BucketRemoteConnectionErr GenericError
 
-func (e RemoteTargetConnectionErr) Error() string {
-	if e.Bucket != "" {
-		return fmt.Sprintf("Remote service endpoint offline, target bucket: %s or remote service credentials: %s invalid \n\t%s", e.Bucket, e.AccessKey, e.Err.Error())
-	}
-	return fmt.Sprintf("Remote service endpoint %s not available\n\t%s", e.Endpoint, e.Err.Error())
-}
-
-// BucketRemoteIdenticalToSource remote already exists for this target type.
-type BucketRemoteIdenticalToSource struct {
-	GenericError
-	Endpoint string
-}
-
-func (e BucketRemoteIdenticalToSource) Error() string {
-	return fmt.Sprintf("Remote service endpoint %s is self referential to current cluster", e.Endpoint)
+func (e BucketRemoteConnectionErr) Error() string {
+	return fmt.Sprintf("Remote service endpoint or target bucket not available: %s \n\t%s", e.Bucket, e.Err.Error())
 }
 
 // BucketRemoteAlreadyExists remote already exists for this target type.
@@ -521,21 +483,7 @@ func (e BucketReplicationSourceNotVersioned) Error() string {
 	return "Replication source does not have versioning enabled: " + e.Bucket
 }
 
-// TransitionStorageClassNotFound remote tier not configured.
-type TransitionStorageClassNotFound GenericError
-
-func (e TransitionStorageClassNotFound) Error() string {
-	return "Transition storage class not found "
-}
-
-// InvalidObjectState restore-object doesn't apply for the current state of the object.
-type InvalidObjectState GenericError
-
-func (e InvalidObjectState) Error() string {
-	return "The operation is not valid for the current state of the object " + e.Bucket + "/" + e.Object + "(" + e.VersionID + ")"
-}
-
-// Bucket related errors.
+/// Bucket related errors.
 
 // BucketNameInvalid - bucketname provided is invalid.
 type BucketNameInvalid GenericError
@@ -545,7 +493,7 @@ func (e BucketNameInvalid) Error() string {
 	return "Bucket name invalid: " + e.Bucket
 }
 
-// Object related errors.
+/// Object related errors.
 
 // ObjectNameInvalid - object name provided is invalid.
 type ObjectNameInvalid GenericError
@@ -568,7 +516,7 @@ func (e ObjectNameTooLong) Error() string {
 
 // Error returns string an error formatted as the given text.
 func (e ObjectNamePrefixAsSlash) Error() string {
-	return "Object name contains forward slash as prefix: " + e.Bucket + "/" + e.Object
+	return "Object name contains forward slash as pefix: " + e.Bucket + "/" + e.Object
 }
 
 // AllAccessDisabled All access to this object has been disabled
@@ -584,7 +532,7 @@ type IncompleteBody GenericError
 
 // Error returns string an error formatted as the given text.
 func (e IncompleteBody) Error() string {
-	return e.Bucket + "/" + e.Object + " has incomplete body"
+	return e.Bucket + "/" + e.Object + "has incomplete body"
 }
 
 // InvalidRange - invalid range typed error.
@@ -595,7 +543,7 @@ type InvalidRange struct {
 }
 
 func (e InvalidRange) Error() string {
-	return fmt.Sprintf("The requested range 'bytes=%d-%d' is not satisfiable", e.OffsetBegin, e.OffsetEnd)
+	return fmt.Sprintf("The requested range \"bytes %d-%d/%d\" is not satisfiable.", e.OffsetBegin, e.OffsetEnd, e.ResourceSize)
 }
 
 // ObjectTooLarge error returned when the size of the object > max object size allowed (5G) per request.
@@ -613,13 +561,14 @@ func (e ObjectTooSmall) Error() string {
 }
 
 // OperationTimedOut - a timeout occurred.
-type OperationTimedOut struct{}
+type OperationTimedOut struct {
+}
 
 func (e OperationTimedOut) Error() string {
 	return "Operation timed out"
 }
 
-// Multipart related errors.
+/// Multipart related errors.
 
 // MalformedUploadID malformed upload id.
 type MalformedUploadID struct {
@@ -678,15 +627,6 @@ func (e InvalidETag) Error() string {
 	return "etag of the object has changed"
 }
 
-// BackendDown is returned for network errors
-type BackendDown struct {
-	Err string
-}
-
-func (e BackendDown) Error() string {
-	return e.Err
-}
-
 // NotImplemented If a feature is not implemented
 type NotImplemented struct {
 	Message string
@@ -703,52 +643,29 @@ func (e UnsupportedMetadata) Error() string {
 	return "Unsupported headers in Metadata"
 }
 
+// BackendDown is returned for network errors or if the gateway's backend is down.
+type BackendDown struct{}
+
+func (e BackendDown) Error() string {
+	return "Backend down"
+}
+
 // isErrBucketNotFound - Check if error type is BucketNotFound.
 func isErrBucketNotFound(err error) bool {
-	if errors.Is(err, errVolumeNotFound) {
-		return true
-	}
-
 	var bkNotFound BucketNotFound
 	return errors.As(err, &bkNotFound)
 }
 
-// isErrReadQuorum check if the error type is InsufficientReadQuorum
-func isErrReadQuorum(err error) bool {
-	var rquorum InsufficientReadQuorum
-	return errors.As(err, &rquorum)
-}
-
-// isErrWriteQuorum check if the error type is InsufficientWriteQuorum
-func isErrWriteQuorum(err error) bool {
-	var rquorum InsufficientWriteQuorum
-	return errors.As(err, &rquorum)
-}
-
 // isErrObjectNotFound - Check if error type is ObjectNotFound.
 func isErrObjectNotFound(err error) bool {
-	if errors.Is(err, errFileNotFound) {
-		return true
-	}
-
 	var objNotFound ObjectNotFound
 	return errors.As(err, &objNotFound)
 }
 
 // isErrVersionNotFound - Check if error type is VersionNotFound.
 func isErrVersionNotFound(err error) bool {
-	if errors.Is(err, errFileVersionNotFound) {
-		return true
-	}
-
 	var versionNotFound VersionNotFound
 	return errors.As(err, &versionNotFound)
-}
-
-// isErrSignatureDoesNotMatch - Check if error type is SignatureDoesNotMatch.
-func isErrSignatureDoesNotMatch(err error) bool {
-	var signatureDoesNotMatch SignatureDoesNotMatch
-	return errors.As(err, &signatureDoesNotMatch)
 }
 
 // PreConditionFailed - Check if copy precondition failed
@@ -761,47 +678,4 @@ func (e PreConditionFailed) Error() string {
 func isErrPreconditionFailed(err error) bool {
 	_, ok := err.(PreConditionFailed)
 	return ok
-}
-
-// isErrMethodNotAllowed - Check if error type is MethodNotAllowed.
-func isErrMethodNotAllowed(err error) bool {
-	var methodNotAllowed MethodNotAllowed
-	return errors.As(err, &methodNotAllowed)
-}
-
-func isErrInvalidRange(err error) bool {
-	if errors.Is(err, errInvalidRange) {
-		return true
-	}
-	_, ok := err.(InvalidRange)
-	return ok
-}
-
-// ReplicationPermissionCheck - Check if error type is ReplicationPermissionCheck.
-type ReplicationPermissionCheck struct{}
-
-func (e ReplicationPermissionCheck) Error() string {
-	return "Replication permission validation requests cannot be completed"
-}
-
-func isReplicationPermissionCheck(err error) bool {
-	_, ok := err.(ReplicationPermissionCheck)
-	return ok
-}
-
-// DataMovementOverwriteErr - captures the error when a data movement activity
-// like rebalance incorrectly tries to overwrite an object.
-type DataMovementOverwriteErr GenericError
-
-func (de DataMovementOverwriteErr) Error() string {
-	objInfoStr := fmt.Sprintf("bucket=%s object=%s", de.Bucket, de.Object)
-	if de.VersionID != "" {
-		objInfoStr = fmt.Sprintf("%s version-id=%s", objInfoStr, de.VersionID)
-	}
-	return fmt.Sprintf("invalid data movement operation, source and destination pool are the same for %s", objInfoStr)
-}
-
-func isDataMovementOverWriteErr(err error) bool {
-	var de DataMovementOverwriteErr
-	return errors.As(err, &de)
 }

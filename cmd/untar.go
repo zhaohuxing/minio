@@ -1,19 +1,18 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2021 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
@@ -21,26 +20,17 @@ import (
 	"archive/tar"
 	"bufio"
 	"bytes"
-	"context"
-	"errors"
+	"compress/bzip2"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path"
-	"runtime"
-	"sync"
-	"time"
 
-	"github.com/cosnicolaou/pbzip2"
 	"github.com/klauspost/compress/s2"
 	"github.com/klauspost/compress/zstd"
 	gzip "github.com/klauspost/pgzip"
-	"github.com/pierrec/lz4/v4"
+	"github.com/pierrec/lz4"
 )
-
-// Max bzip2 concurrency across calls. 50% of GOMAXPROCS.
-var bz2Limiter = pbzip2.CreateConcurrencyPool((runtime.GOMAXPROCS(0) + 1) / 2)
 
 func detect(r *bufio.Reader) format {
 	z, err := r.Peek(4)
@@ -101,36 +91,7 @@ var magicHeaders = []struct {
 	},
 }
 
-type untarOptions struct {
-	ignoreDirs bool
-	ignoreErrs bool
-	prefixAll  string
-}
-
-// disconnectReader will ensure that no reads can take place on
-// the upstream reader after close has been called.
-type disconnectReader struct {
-	r  io.Reader
-	mu sync.Mutex
-}
-
-func (d *disconnectReader) Read(p []byte) (n int, err error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.r != nil {
-		return d.r.Read(p)
-	}
-	return 0, errors.New("reader closed")
-}
-
-func (d *disconnectReader) Close() error {
-	d.mu.Lock()
-	d.r = nil
-	d.mu.Unlock()
-	return nil
-}
-
-func untar(ctx context.Context, r io.Reader, putObject func(reader io.Reader, info os.FileInfo, name string) error, o untarOptions) error {
+func untar(r io.Reader, putObject func(reader io.Reader, info os.FileInfo, name string)) error {
 	bf := bufio.NewReader(r)
 	switch f := detect(bf); f {
 	case formatGzip:
@@ -143,19 +104,14 @@ func untar(ctx context.Context, r io.Reader, putObject func(reader io.Reader, in
 	case formatS2:
 		r = s2.NewReader(bf)
 	case formatZstd:
-		// Limit to 16 MiB per stream.
-		dec, err := zstd.NewReader(bf, zstd.WithDecoderMaxWindow(16<<20))
+		dec, err := zstd.NewReader(bf)
 		if err != nil {
 			return err
 		}
 		defer dec.Close()
 		r = dec
 	case formatBZ2:
-		ctx, cancel := context.WithCancel(ctx)
-		defer cancel()
-		r = pbzip2.NewReader(ctx, bf, pbzip2.DecompressionOptions(
-			pbzip2.BZConcurrency((runtime.GOMAXPROCS(0)+1)/2),
-			pbzip2.BZConcurrencyPool(bz2Limiter)))
+		r = bzip2.NewReader(bf)
 	case formatLZ4:
 		r = lz4.NewReader(bf)
 	case formatUnknown:
@@ -164,38 +120,18 @@ func untar(ctx context.Context, r io.Reader, putObject func(reader io.Reader, in
 		return fmt.Errorf("Unsupported format %s", f)
 	}
 	tarReader := tar.NewReader(r)
-	n := 0
-	asyncWriters := make(chan struct{}, 16)
-	var wg sync.WaitGroup
-
-	var asyncErr error
-	var asyncErrMu sync.Mutex
 	for {
-		if !o.ignoreErrs {
-			asyncErrMu.Lock()
-			err := asyncErr
-			asyncErrMu.Unlock()
-			if err != nil {
-				return err
-			}
-		}
-
 		header, err := tarReader.Next()
+
 		switch {
 
 		// if no more files are found return
 		case err == io.EOF:
-			wg.Wait()
-			return asyncErr
+			return nil
 
 		// return any other error
 		case err != nil:
-			wg.Wait()
-			extra := ""
-			if n > 0 {
-				extra = fmt.Sprintf(" after %d successful object(s)", n)
-			}
-			return fmt.Errorf("tar file error: %w%s", err, extra)
+			return err
 
 		// if the header is nil, just skip it (not sure how this happens)
 		case header == nil:
@@ -203,80 +139,18 @@ func untar(ctx context.Context, r io.Reader, putObject func(reader io.Reader, in
 		}
 
 		name := header.Name
-		switch path.Clean(name) {
-		case ".", slashSeparator:
+		if name == slashSeparator {
 			continue
 		}
 
 		switch header.Typeflag {
 		case tar.TypeDir: // = directory
-			if o.ignoreDirs {
-				continue
-			}
-			name = trimLeadingSlash(pathJoin(name, slashSeparator))
+			putObject(tarReader, header.FileInfo(), trimLeadingSlash(pathJoin(name, slashSeparator)))
 		case tar.TypeReg, tar.TypeChar, tar.TypeBlock, tar.TypeFifo, tar.TypeGNUSparse: // = regular
-			name = trimLeadingSlash(path.Clean(name))
+			putObject(tarReader, header.FileInfo(), trimLeadingSlash(path.Clean(name)))
 		default:
 			// ignore symlink'ed
 			continue
 		}
-		if o.prefixAll != "" {
-			name = pathJoin(o.prefixAll, name)
-		}
-
-		// Do small files async
-		n++
-		if header.Size <= smallFileThreshold {
-			asyncWriters <- struct{}{}
-			b := poolBuf128k.Get().([]byte)
-			if cap(b) < int(header.Size) {
-				b = make([]byte, smallFileThreshold)
-			}
-			b = b[:header.Size]
-			if _, err := io.ReadFull(tarReader, b); err != nil {
-				return err
-			}
-			wg.Add(1)
-			go func(name string, fi fs.FileInfo, b []byte) {
-				rc := disconnectReader{r: bytes.NewReader(b)}
-				defer func() {
-					rc.Close()
-					<-asyncWriters
-					wg.Done()
-					//nolint:staticcheck // SA6002 we are fine with the tiny alloc
-					poolBuf128k.Put(b)
-				}()
-				if err := putObject(&rc, fi, name); err != nil {
-					if o.ignoreErrs {
-						s3LogIf(ctx, err)
-						return
-					}
-					asyncErrMu.Lock()
-					if asyncErr == nil {
-						asyncErr = err
-					}
-					asyncErrMu.Unlock()
-				}
-			}(name, header.FileInfo(), b)
-			continue
-		}
-
-		// If zero or earlier modtime, set to current.
-		// Otherwise the resulting objects will be invalid.
-		if header.ModTime.UnixNano() <= 0 {
-			header.ModTime = time.Now()
-		}
-
-		// Sync upload.
-		rc := disconnectReader{r: tarReader}
-		if err := putObject(&rc, header.FileInfo(), name); err != nil {
-			rc.Close()
-			if o.ignoreErrs {
-				s3LogIf(ctx, err)
-				continue
-			}
-			return err
-		}
-		rc.Close()
 	}
 }

@@ -1,24 +1,24 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2016 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
 import (
 	"fmt"
+	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
@@ -35,7 +35,7 @@ func TestReadDirFail(t *testing.T) {
 	}
 
 	file := path.Join(os.TempDir(), "issue")
-	if err := os.WriteFile(file, []byte(""), 0o644); err != nil {
+	if err := ioutil.WriteFile(file, []byte(""), 0644); err != nil {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(file)
@@ -48,7 +48,7 @@ func TestReadDirFail(t *testing.T) {
 	// Only valid for linux.
 	if runtime.GOOS == "linux" {
 		permDir := path.Join(os.TempDir(), "perm-dir")
-		if err := os.MkdirAll(permDir, os.FileMode(0o200)); err != nil {
+		if err := os.MkdirAll(permDir, os.FileMode(0200)); err != nil {
 			t.Fatal(err)
 		}
 		defer os.RemoveAll(permDir)
@@ -66,20 +66,29 @@ type result struct {
 	entries []string
 }
 
+func mustSetupDir(t *testing.T) string {
+	// Create unique test directory.
+	dir, err := ioutil.TempDir(globalTestTmpDir, "minio-list-dir")
+	if err != nil {
+		t.Fatalf("Unable to setup directory, %s", err)
+	}
+	return dir
+}
+
 // Test to read empty directory.
 func setupTestReadDirEmpty(t *testing.T) (testResults []result) {
 	// Add empty entry slice for this test directory.
-	testResults = append(testResults, result{t.TempDir(), []string{}})
+	testResults = append(testResults, result{mustSetupDir(t), []string{}})
 	return testResults
 }
 
 // Test to read non-empty directory with only files.
 func setupTestReadDirFiles(t *testing.T) (testResults []result) {
-	dir := t.TempDir()
+	dir := mustSetupDir(t)
 	entries := []string{}
 	for i := 0; i < 10; i++ {
 		name := fmt.Sprintf("file-%d", i)
-		if err := os.WriteFile(filepath.Join(dir, name), []byte{}, os.ModePerm); err != nil {
+		if err := ioutil.WriteFile(filepath.Join(dir, name), []byte{}, os.ModePerm); err != nil {
 			// For cleanup, its required to add these entries into test results.
 			testResults = append(testResults, result{dir, entries})
 			t.Fatalf("Unable to create file, %s", err)
@@ -97,14 +106,14 @@ func setupTestReadDirFiles(t *testing.T) (testResults []result) {
 
 // Test to read non-empty directory with directories and files.
 func setupTestReadDirGeneric(t *testing.T) (testResults []result) {
-	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "mydir"), 0o777); err != nil {
+	dir := mustSetupDir(t)
+	if err := os.MkdirAll(filepath.Join(dir, "mydir"), 0777); err != nil {
 		t.Fatalf("Unable to create prefix directory \"mydir\", %s", err)
 	}
 	entries := []string{"mydir/"}
 	for i := 0; i < 10; i++ {
 		name := fmt.Sprintf("file-%d", i)
-		if err := os.WriteFile(filepath.Join(dir, "mydir", name), []byte{}, os.ModePerm); err != nil {
+		if err := ioutil.WriteFile(filepath.Join(dir, "mydir", name), []byte{}, os.ModePerm); err != nil {
 			// For cleanup, its required to add these entries into test results.
 			testResults = append(testResults, result{dir, entries})
 			t.Fatalf("Unable to write file, %s", err)
@@ -124,12 +133,12 @@ func setupTestReadDirSymlink(t *testing.T) (testResults []result) {
 		t.Skip("symlinks not available on windows")
 		return nil
 	}
-	dir := t.TempDir()
+	dir := mustSetupDir(t)
 	entries := []string{}
 	for i := 0; i < 10; i++ {
 		name1 := fmt.Sprintf("file-%d", i)
 		name2 := fmt.Sprintf("file-%d", i+10)
-		if err := os.WriteFile(filepath.Join(dir, name1), []byte{}, os.ModePerm); err != nil {
+		if err := ioutil.WriteFile(filepath.Join(dir, name1), []byte{}, os.ModePerm); err != nil {
 			// For cleanup, its required to add these entries into test results.
 			testResults = append(testResults, result{dir, entries})
 			t.Fatalf("Unable to create a file, %s", err)
@@ -143,7 +152,7 @@ func setupTestReadDirSymlink(t *testing.T) (testResults []result) {
 		// Symlinks are preserved for regular files
 		entries = append(entries, name2)
 	}
-	if err := os.MkdirAll(filepath.Join(dir, "mydir"), 0o777); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "mydir"), 0777); err != nil {
 		t.Fatalf("Unable to create \"mydir\", %s", err)
 	}
 	entries = append(entries, "mydir/")
@@ -231,10 +240,10 @@ func TestReadDirN(t *testing.T) {
 	}
 
 	for i, testCase := range testCases {
-		dir := t.TempDir()
+		dir := mustSetupDir(t)
 
 		for c := 1; c <= testCase.numFiles; c++ {
-			err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("%d", c)), []byte{}, os.ModePerm)
+			err := ioutil.WriteFile(filepath.Join(dir, fmt.Sprintf("%d", c)), []byte{}, os.ModePerm)
 			if err != nil {
 				os.RemoveAll(dir)
 				t.Fatalf("Unable to create a file, %s", err)

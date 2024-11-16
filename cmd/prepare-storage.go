@@ -1,35 +1,36 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2016 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
-	"path/filepath"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/dustin/go-humanize"
-	xhttp "github.com/minio/minio/internal/http"
-	"github.com/minio/minio/internal/logger"
+	xhttp "github.com/minio/minio/cmd/http"
+	"github.com/minio/minio/cmd/logger"
+	"github.com/minio/minio/pkg/sync/errgroup"
 )
 
 var printEndpointError = func() func(Endpoint, error, bool) {
@@ -45,10 +46,10 @@ var printEndpointError = func() func(Endpoint, error, bool) {
 		m, ok := printOnce[endpoint]
 		if !ok {
 			m = make(map[string]int)
+			m[err.Error()]++
 			printOnce[endpoint] = m
 			if once {
-				m[err.Error()]++
-				peersLogAlwaysIf(ctx, err)
+				logger.LogAlwaysIf(ctx, err)
 				return
 			}
 		}
@@ -60,7 +61,7 @@ var printEndpointError = func() func(Endpoint, error, bool) {
 		// once not set, check if same error occurred 3 times in
 		// a row, then make sure we print it to call attention.
 		if m[err.Error()] > 2 {
-			peersLogAlwaysIf(ctx, fmt.Errorf("Following error has been printed %d times.. %w", m[err.Error()], err))
+			logger.LogAlwaysIf(ctx, fmt.Errorf("Following error has been printed %d times.. %w", m[err.Error()], err))
 			// Reduce the count to introduce further delay in printing
 			// but let it again print after the 2th attempt
 			m[err.Error()]--
@@ -70,45 +71,80 @@ var printEndpointError = func() func(Endpoint, error, bool) {
 	}
 }()
 
-// Cleans up tmp directory of the local disk.
-func bgFormatErasureCleanupTmp(diskPath string) {
-	// Need to move temporary objects left behind from previous run of minio
-	// server to a unique directory under `minioMetaTmpBucket-old` to clean
-	// up `minioMetaTmpBucket` for the current run.
-	//
-	// /disk1/.minio.sys/tmp-old/
-	//  |__ 33a58b40-aecc-4c9f-a22f-ff17bfa33b62
-	//  |__ e870a2c1-d09c-450c-a69c-6eaa54a89b3e
-	//
-	// In this example, `33a58b40-aecc-4c9f-a22f-ff17bfa33b62` directory contains
-	// temporary objects from one of the previous runs of minio server.
-	tmpID := mustGetUUID()
-	tmpOld := pathJoin(diskPath, minioMetaTmpBucket+"-old", tmpID)
-	if err := renameAll(pathJoin(diskPath, minioMetaTmpBucket),
-		tmpOld, diskPath); err != nil && !errors.Is(err, errFileNotFound) {
-		storageLogIf(GlobalContext, fmt.Errorf("unable to rename (%s -> %s) %w, drive may be faulty, please investigate",
-			pathJoin(diskPath, minioMetaTmpBucket),
-			tmpOld,
-			osErrToFileErr(err)))
+// Migrates backend format of local disks.
+func formatErasureMigrateLocalEndpoints(endpoints Endpoints) error {
+	g := errgroup.WithNErrs(len(endpoints))
+	for index, endpoint := range endpoints {
+		if !endpoint.IsLocal {
+			continue
+		}
+		index := index
+		g.Go(func() error {
+			epPath := endpoints[index].Path
+			err := formatErasureMigrate(epPath)
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			return nil
+		}, index)
 	}
-
-	if err := mkdirAll(pathJoin(diskPath, minioMetaTmpDeletedBucket), 0o777, diskPath); err != nil {
-		storageLogIf(GlobalContext, fmt.Errorf("unable to create (%s) %w, drive may be faulty, please investigate",
-			pathJoin(diskPath, minioMetaTmpBucket),
-			err))
+	for _, err := range g.Wait() {
+		if err != nil {
+			return err
+		}
 	}
+	return nil
+}
 
-	// Delete all temporary files created for DirectIO write check
-	files, _ := filepath.Glob(filepath.Join(diskPath, ".writable-check-*.tmp"))
-	for _, file := range files {
-		go removeAll(file)
+// Cleans up tmp directory of local disks.
+func formatErasureCleanupTmpLocalEndpoints(endpoints Endpoints) error {
+	g := errgroup.WithNErrs(len(endpoints))
+	for index, endpoint := range endpoints {
+		if !endpoint.IsLocal {
+			continue
+		}
+		index := index
+		g.Go(func() error {
+			epPath := endpoints[index].Path
+			// Need to move temporary objects left behind from previous run of minio
+			// server to a unique directory under `minioMetaTmpBucket-old` to clean
+			// up `minioMetaTmpBucket` for the current run.
+			//
+			// /disk1/.minio.sys/tmp-old/
+			//  |__ 33a58b40-aecc-4c9f-a22f-ff17bfa33b62
+			//  |__ e870a2c1-d09c-450c-a69c-6eaa54a89b3e
+			//
+			// In this example, `33a58b40-aecc-4c9f-a22f-ff17bfa33b62` directory contains
+			// temporary objects from one of the previous runs of minio server.
+			tmpOld := pathJoin(epPath, minioMetaTmpBucket+"-old", mustGetUUID())
+			if err := renameAll(pathJoin(epPath, minioMetaTmpBucket),
+				tmpOld); err != nil && err != errFileNotFound {
+				return fmt.Errorf("unable to rename (%s -> %s) %w",
+					pathJoin(epPath, minioMetaTmpBucket),
+					tmpOld,
+					osErrToFileErr(err))
+			}
+
+			// Renames and schedules for puring all bucket metacache.
+			renameAllBucketMetacache(epPath)
+
+			// Removal of tmp-old folder is backgrounded completely.
+			go removeAll(pathJoin(epPath, minioMetaTmpBucket+"-old"))
+
+			if err := mkdirAll(pathJoin(epPath, minioMetaTmpBucket), 0777); err != nil {
+				return fmt.Errorf("unable to create (%s) %w",
+					pathJoin(epPath, minioMetaTmpBucket),
+					err)
+			}
+			return nil
+		}, index)
 	}
-
-	// Remove the entire folder in case there are leftovers that didn't get cleaned up before restart.
-	go removeAll(pathJoin(diskPath, minioMetaTmpBucket+"-old"))
-
-	// Renames and schedules for purging all bucket metacache.
-	go renameAllBucketMetacache(diskPath)
+	for _, err := range g.Wait() {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Following error message is added to fix a regression in release
@@ -128,21 +164,42 @@ func isServerResolvable(endpoint Endpoint, timeout time.Duration) error {
 		Path:   pathJoin(healthCheckPathPrefix, healthCheckLivenessPath),
 	}
 
-	httpClient := &http.Client{
-		Transport: globalInternodeTransport,
+	var tlsConfig *tls.Config
+	if globalIsTLS {
+		tlsConfig = &tls.Config{
+			RootCAs: globalRootCAs,
+		}
 	}
 
+	httpClient := &http.Client{
+		Transport:
+		// For more details about various values used here refer
+		// https://golang.org/pkg/net/http/#Transport documentation
+		&http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           xhttp.NewCustomDialContext(3 * time.Second),
+			ResponseHeaderTimeout: 3 * time.Second,
+			TLSHandshakeTimeout:   3 * time.Second,
+			ExpectContinueTimeout: 3 * time.Second,
+			TLSClientConfig:       tlsConfig,
+			// Go net/http automatically unzip if content-type is
+			// gzip disable this feature, as we are always interested
+			// in raw stream.
+			DisableCompression: true,
+		},
+	}
+	defer httpClient.CloseIdleConnections()
+
 	ctx, cancel := context.WithTimeout(GlobalContext, timeout)
-	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, serverURL.String(), nil)
 	if err != nil {
+		cancel()
 		return err
 	}
-	// Indicate that the liveness check for a peer call
-	req.Header.Set(xhttp.MinIOPeerCall, "true")
 
 	resp, err := httpClient.Do(req)
+	cancel()
 	if err != nil {
 		return err
 	}
@@ -154,28 +211,35 @@ func isServerResolvable(endpoint Endpoint, timeout time.Duration) error {
 // connect to list of endpoints and load all Erasure disk formats, validate the formats are correct
 // and are in quorum, if no formats are found attempt to initialize all of them for the first
 // time. additionally make sure to close all the disks used in this attempt.
-func connectLoadInitFormats(verboseLogging bool, firstDisk bool, storageDisks []StorageAPI, endpoints Endpoints, poolCount, setCount, setDriveCount int, deploymentID string) (format *formatErasureV3, err error) {
-	// Attempt to load all `format.json` from all disks.
-	formatConfigs, sErrs := loadFormatErasureAll(storageDisks, false)
+func connectLoadInitFormats(retryCount int, firstDisk bool, endpoints Endpoints, poolCount, setCount, setDriveCount int, deploymentID, distributionAlgo string) (storageDisks []StorageAPI, format *formatErasureV3, err error) {
+	// Initialize all storage disks
+	storageDisks, errs := initStorageDisksWithErrors(endpoints)
 
-	if err := checkDiskFatalErrs(sErrs); err != nil {
-		return nil, err
+	defer func(storageDisks []StorageAPI) {
+		if err != nil {
+			closeStorageDisks(storageDisks)
+		}
+	}(storageDisks)
+
+	for i, err := range errs {
+		if err != nil {
+			if err != errDiskNotFound {
+				return nil, nil, fmt.Errorf("Disk %s: %w", endpoints[i], err)
+			}
+			if retryCount >= 5 {
+				logger.Info("Unable to connect to %s: %v\n", endpoints[i], isServerResolvable(endpoints[i], time.Second))
+			}
+		}
 	}
 
-	for i, err := range sErrs {
-		if err != nil && !errors.Is(err, errXLBackend) && !errors.Is(err, errUnformattedDisk) {
-			if errors.Is(err, errDiskNotFound) && verboseLogging {
-				if globalEndpoints.NEndpoints() > 1 {
-					logger.Info("Unable to connect to %s: %v, will be retried", endpoints[i], isServerResolvable(endpoints[i], time.Second))
-				} else {
-					logger.Fatal(err, "Unable to connect to %s: %v", endpoints[i], isServerResolvable(endpoints[i], time.Second))
-				}
-			} else {
-				if globalEndpoints.NEndpoints() > 1 {
-					logger.Info("Unable to use the drive %s: %v, will be retried", endpoints[i], err)
-				} else {
-					logger.Fatal(errInvalidArgument, "Unable to use the drive %s: %v", endpoints[i], err)
-				}
+	// Attempt to load all `format.json` from all disks.
+	formatConfigs, sErrs := loadFormatErasureAll(storageDisks, false)
+	// Check if we have
+	for i, sErr := range sErrs {
+		// print the error, nonetheless, which is perhaps unhandled
+		if sErr != errUnformattedDisk && sErr != errDiskNotFound && retryCount >= 5 {
+			if sErr != nil {
+				logger.Info("Unable to read 'format.json' from %s: %v\n", endpoints[i], sErr)
 			}
 		}
 	}
@@ -186,7 +250,7 @@ func connectLoadInitFormats(verboseLogging bool, firstDisk bool, storageDisks []
 	// with expected Erasure format. For example if a user is
 	// trying to pool FS backend into an Erasure set.
 	if err = checkFormatErasureValues(formatConfigs, storageDisks, setDriveCount); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// All disks report unformatted we should initialized everyone.
@@ -195,50 +259,86 @@ func connectLoadInitFormats(verboseLogging bool, firstDisk bool, storageDisks []
 			humanize.Ordinal(poolCount), setCount, setDriveCount)
 
 		// Initialize erasure code format on disks
-		format, err = initFormatErasure(GlobalContext, storageDisks, setCount, setDriveCount, deploymentID, sErrs)
+		format, err = initFormatErasure(GlobalContext, storageDisks, setCount, setDriveCount, deploymentID, distributionAlgo, sErrs)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
-		return format, nil
+		// Assign globalDeploymentID on first run for the
+		// minio server managing the first disk
+		globalDeploymentID = format.ID
+		return storageDisks, format, nil
 	}
 
 	// Return error when quorum unformatted disks - indicating we are
 	// waiting for first server to be online.
-	unformattedDisks := quorumUnformattedDisks(sErrs)
-	if unformattedDisks && !firstDisk {
-		return nil, errNotFirstDisk
+	if quorumUnformattedDisks(sErrs) && !firstDisk {
+		return nil, nil, errNotFirstDisk
 	}
 
 	// Return error when quorum unformatted disks but waiting for rest
 	// of the servers to be online.
-	if unformattedDisks && firstDisk {
-		return nil, errFirstDiskWait
+	if quorumUnformattedDisks(sErrs) && firstDisk {
+		return nil, nil, errFirstDiskWait
+	}
+
+	// Mark all root disks down
+	markRootDisksAsDown(storageDisks, sErrs)
+
+	// Following function is added to fix a regressions which was introduced
+	// in release RELEASE.2018-03-16T22-52-12Z after migrating v1 to v2 to v3.
+	// This migration failed to capture '.This' field properly which indicates
+	// the disk UUID association. Below function is called to handle and fix
+	// this regression, for more info refer https://github.com/minio/minio/issues/5667
+	if err = fixFormatErasureV3(storageDisks, endpoints, formatConfigs); err != nil {
+		return nil, nil, err
+	}
+
+	// If any of the .This field is still empty, we return error.
+	if formatErasureV3ThisEmpty(formatConfigs) {
+		return nil, nil, errErasureV3ThisEmpty
 	}
 
 	format, err = getFormatErasureInQuorum(formatConfigs)
 	if err != nil {
-		var drivesNotFound int
-		for _, format := range formatConfigs {
-			if format != nil {
-				continue
-			}
-			drivesNotFound++
-		}
-		return nil, fmt.Errorf("%w (offline-drives=%d/%d)", err, drivesNotFound, len(formatConfigs))
+		return nil, nil, err
 	}
 
 	if format.ID == "" {
-		return nil, errors.New("deployment ID missing from disk format, unable to start the server")
+		// Not a first disk, wait until first disk fixes deploymentID
+		if !firstDisk {
+			return nil, nil, errNotFirstDisk
+		}
+		if err = formatErasureFixDeploymentID(endpoints, storageDisks, format); err != nil {
+			return nil, nil, err
+		}
 	}
 
-	return format, nil
+	globalDeploymentID = format.ID
+
+	if err = formatErasureFixLocalDeploymentID(endpoints, storageDisks, format); err != nil {
+		return nil, nil, err
+	}
+
+	// The will always recreate some directories inside .minio.sys of
+	// the local disk such as tmp, multipart and background-ops
+	initErasureMetaVolumesInLocalDisks(storageDisks, formatConfigs)
+
+	return storageDisks, format, nil
 }
 
 // Format disks before initialization of object layer.
-func waitForFormatErasure(firstDisk bool, endpoints Endpoints, poolCount, setCount, setDriveCount int, deploymentID string) (storageDisks []StorageAPI, format *formatErasureV3, err error) {
+func waitForFormatErasure(firstDisk bool, endpoints Endpoints, poolCount, setCount, setDriveCount int, deploymentID, distributionAlgo string) ([]StorageAPI, *formatErasureV3, error) {
 	if len(endpoints) == 0 || setCount == 0 || setDriveCount == 0 {
 		return nil, nil, errInvalidArgument
+	}
+
+	if err := formatErasureMigrateLocalEndpoints(endpoints); err != nil {
+		return nil, nil, err
+	}
+
+	if err := formatErasureCleanupTmpLocalEndpoints(endpoints); err != nil {
+		return nil, nil, err
 	}
 
 	// prepare getElapsedTime() to calculate elapsed time since we started trying formatting disks.
@@ -248,78 +348,38 @@ func waitForFormatErasure(firstDisk bool, endpoints Endpoints, poolCount, setCou
 		return time.Now().Round(time.Second).Sub(formatStartTime).String()
 	}
 
-	var (
-		tries   int
-		verbose bool
-	)
-
-	// Initialize all storage disks
-	storageDisks, errs := initStorageDisksWithErrors(endpoints, storageOpts{cleanUp: true, healthCheck: true})
-
-	if err := checkDiskFatalErrs(errs); err != nil {
-		return nil, nil, err
-	}
-
-	defer func() {
-		if err == nil && format != nil {
-			// Assign globalDeploymentID() on first run for the
-			// minio server managing the first disk
-			globalDeploymentIDPtr.Store(&format.ID)
-
-			// Set the deployment ID here to avoid races.
-			xhttp.SetDeploymentID(format.ID)
-			xhttp.SetMinIOVersion(Version)
-		}
-	}()
-
-	format, err = connectLoadInitFormats(verbose, firstDisk, storageDisks, endpoints, poolCount, setCount, setDriveCount, deploymentID)
-	if err == nil {
-		return storageDisks, format, nil
-	}
-
-	tries++ // tried already once
-
 	// Wait on each try for an update.
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
-
+	var tries int
 	for {
-		// Only log once every 10 iterations, then reset the tries count.
-		verbose = tries >= 10
-		if verbose {
-			tries = 1
-		}
-
-		format, err = connectLoadInitFormats(verbose, firstDisk, storageDisks, endpoints, poolCount, setCount, setDriveCount, deploymentID)
-		if err == nil {
-			return storageDisks, format, nil
-		}
-
-		tries++
-		switch {
-		case errors.Is(err, errNotFirstDisk):
-			// Fresh setup, wait for first server to be up.
-			logger.Info("Waiting for the first server to format the drives (elapsed %s)\n", getElapsedTime())
-		case errors.Is(err, errFirstDiskWait):
-			// Fresh setup, wait for other servers to come up.
-			logger.Info("Waiting for all other servers to be online to format the drives (elapses %s)\n", getElapsedTime())
-		case errors.Is(err, errErasureReadQuorum):
-			// no quorum available continue to wait for minimum number of servers.
-			logger.Info("Waiting for a minimum of %d drives to come online (elapsed %s)\n",
-				len(endpoints)/2, getElapsedTime())
-		case errors.Is(err, errErasureWriteQuorum):
-			// no quorum available continue to wait for minimum number of servers.
-			logger.Info("Waiting for a minimum of %d drives to come online (elapsed %s)\n",
-				(len(endpoints)/2)+1, getElapsedTime())
-		case errors.Is(err, errErasureV3ThisEmpty):
-			// need to wait for this error to be healed, so continue.
-		default:
-			// For all other unhandled errors we exit and fail.
-			return nil, nil, err
-		}
-
 		select {
 		case <-ticker.C:
+			storageDisks, format, err := connectLoadInitFormats(tries, firstDisk, endpoints, poolCount, setCount, setDriveCount, deploymentID, distributionAlgo)
+			if err != nil {
+				tries++
+				switch err {
+				case errNotFirstDisk:
+					// Fresh setup, wait for first server to be up.
+					logger.Info("Waiting for the first server to format the disks.")
+					continue
+				case errFirstDiskWait:
+					// Fresh setup, wait for other servers to come up.
+					logger.Info("Waiting for all other servers to be online to format the disks.")
+					continue
+				case errErasureReadQuorum:
+					// no quorum available continue to wait for minimum number of servers.
+					logger.Info("Waiting for a minimum of %d disks to come online (elapsed %s)\n", len(endpoints)/2, getElapsedTime())
+					continue
+				case errErasureV3ThisEmpty:
+					// need to wait for this error to be healed, so continue.
+					continue
+				default:
+					// For all other unhandled errors we exit and fail.
+					return nil, nil, err
+				}
+			}
+			return storageDisks, format, nil
 		case <-globalOSSignalCh:
 			return nil, nil, fmt.Errorf("Initializing data volumes gracefully stopped")
 		}

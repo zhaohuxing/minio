@@ -2,7 +2,7 @@
 
 Docker Compose allows defining and running single host, multi-container Docker applications.
 
-With Compose, you use a Compose file to configure MinIO services. Then, using a single command, you can create and launch all the Distributed MinIO instances from your configuration. Distributed MinIO instances will be deployed in multiple containers on the same host. This is a great way to set up development, testing, and staging environments, based on Distributed MinIO.
+With Compose, you use a Compose file to configure MinIO services. Then, using a single command, you can create and launch all the Distributed MinIO instances from your configuration. Distributed MinIO instances will be deployed in multiple containers on the same host. This is a great way to set up development, testing, and staging environments, based on Distributed MinIO. 
 
 ## 1. Prerequisites
 
@@ -20,12 +20,6 @@ docker-compose pull
 docker-compose up
 ```
 
-or
-
-```sh
-docker stack deploy --compose-file docker-compose.yaml minio
-```
-
 ### Windows
 
 ```sh
@@ -33,13 +27,7 @@ docker-compose.exe pull
 docker-compose.exe up
 ```
 
-or
-
-```sh
-docker stack deploy --compose-file docker-compose.yaml minio
-```
-
-Distributed instances are now accessible on the host using the Minio CLI on port 9000 and the Minio Web Console on port 9001. Proceed to access the Web browser at <http://127.0.0.1:9001/>. Here 4 MinIO server instances are reverse proxied through Nginx load balancing.
+Distributed instances are now accessible on the host at ports 9000, proceed to access the Web browser at http://127.0.0.1:9000/. Here 4 MinIO server instances are reverse proxied through Nginx load balancing.
 
 ### Notes
 
@@ -50,10 +38,10 @@ Distributed instances are now accessible on the host using the Minio CLI on port
   * Update the command section in each service.
   * Add a new MinIO server instance to the upstream directive in the Nginx configuration file.
 
-  Read more about distributed MinIO [here](https://min.io/docs/minio/container/operations/install-deploy-manage/deploy-minio-single-node-multi-drive.html).
+  Read more about distributed MinIO [here](https://docs.min.io/docs/distributed-minio-quickstart-guide).
 
 ### Explore Further
-
-* [Overview of Docker Compose](https://docs.docker.com/compose/overview/)
-* [MinIO Docker Quickstart Guide](https://min.io/docs/minio/container/index.html#quickstart-for-containers)
-* [MinIO Erasure Code QuickStart Guide](https://min.io/docs/minio/container/operations/concepts/erasure-coding.html)
+- [Overview of Docker Compose](https://docs.docker.com/compose/overview/)
+- [MinIO Docker Quickstart Guide](https://docs.min.io/docs/minio-docker-quickstart-guide)
+- [Deploy MinIO on Docker Swarm](https://docs.min.io/docs/deploy-minio-on-docker-swarm)
+- [MinIO Erasure Code QuickStart Guide](https://docs.min.io/docs/minio-erasure-code-quickstart-guide)

@@ -1,19 +1,18 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2017 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
@@ -28,7 +27,7 @@ import (
 
 	"github.com/cespare/xxhash/v2"
 	"github.com/klauspost/reedsolomon"
-	"github.com/minio/minio/internal/logger"
+	"github.com/minio/minio/cmd/logger"
 )
 
 // Erasure - erasure encoding details.
@@ -41,7 +40,7 @@ type Erasure struct {
 // NewErasure creates a new ErasureStorage.
 func NewErasure(ctx context.Context, dataBlocks, parityBlocks int, blockSize int64) (e Erasure, err error) {
 	// Check the parameters for sanity now.
-	if dataBlocks <= 0 || parityBlocks < 0 {
+	if dataBlocks <= 0 || parityBlocks <= 0 {
 		return e, reedsolomon.ErrInvShardNum
 	}
 
@@ -80,9 +79,11 @@ func (e *Erasure) EncodeData(ctx context.Context, data []byte) ([][]byte, error)
 	}
 	encoded, err := e.encoder().Split(data)
 	if err != nil {
+		logger.LogIf(ctx, err)
 		return nil, err
 	}
 	if err = e.encoder().Encode(encoded); err != nil {
+		logger.LogIf(ctx, err)
 		return nil, err
 	}
 	return encoded, nil
@@ -92,8 +93,8 @@ func (e *Erasure) EncodeData(ctx context.Context, data []byte) ([][]byte, error)
 // It only decodes the data blocks but does not verify them.
 // It returns an error if the decoding failed.
 func (e *Erasure) DecodeDataBlocks(data [][]byte) error {
-	isZero := 0
-	for _, b := range data {
+	var isZero = 0
+	for _, b := range data[:] {
 		if len(b) == 0 {
 			isZero++
 			break
@@ -109,7 +110,11 @@ func (e *Erasure) DecodeDataBlocks(data [][]byte) error {
 // DecodeDataAndParityBlocks decodes the given erasure-coded data and verifies it.
 // It returns an error if the decoding failed.
 func (e *Erasure) DecodeDataAndParityBlocks(ctx context.Context, data [][]byte) error {
-	return e.encoder().Reconstruct(data)
+	if err := e.encoder().Reconstruct(data); err != nil {
+		logger.LogIf(ctx, err)
+		return err
+	}
+	return nil
 }
 
 // ShardSize - returns actual shared size from erasure blockSize.

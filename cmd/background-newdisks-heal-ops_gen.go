@@ -72,28 +72,16 @@ func (z *healingTracker) DecodeMsg(dc *msgp.Reader) (err error) {
 				err = msgp.WrapError(err, "LastUpdate")
 				return
 			}
-		case "ObjectsTotalCount":
-			z.ObjectsTotalCount, err = dc.ReadUint64()
+		case "ObjectsHealed":
+			z.ObjectsHealed, err = dc.ReadUint64()
 			if err != nil {
-				err = msgp.WrapError(err, "ObjectsTotalCount")
+				err = msgp.WrapError(err, "ObjectsHealed")
 				return
 			}
-		case "ObjectsTotalSize":
-			z.ObjectsTotalSize, err = dc.ReadUint64()
+		case "ObjectsFailed":
+			z.ObjectsFailed, err = dc.ReadUint64()
 			if err != nil {
-				err = msgp.WrapError(err, "ObjectsTotalSize")
-				return
-			}
-		case "ItemsHealed":
-			z.ItemsHealed, err = dc.ReadUint64()
-			if err != nil {
-				err = msgp.WrapError(err, "ItemsHealed")
-				return
-			}
-		case "ItemsFailed":
-			z.ItemsFailed, err = dc.ReadUint64()
-			if err != nil {
-				err = msgp.WrapError(err, "ItemsFailed")
+				err = msgp.WrapError(err, "ObjectsFailed")
 				return
 			}
 		case "BytesDone":
@@ -120,22 +108,16 @@ func (z *healingTracker) DecodeMsg(dc *msgp.Reader) (err error) {
 				err = msgp.WrapError(err, "Object")
 				return
 			}
-		case "ResumeItemsHealed":
-			z.ResumeItemsHealed, err = dc.ReadUint64()
+		case "ResumeObjectsHealed":
+			z.ResumeObjectsHealed, err = dc.ReadUint64()
 			if err != nil {
-				err = msgp.WrapError(err, "ResumeItemsHealed")
+				err = msgp.WrapError(err, "ResumeObjectsHealed")
 				return
 			}
-		case "ResumeItemsFailed":
-			z.ResumeItemsFailed, err = dc.ReadUint64()
+		case "ResumeObjectsFailed":
+			z.ResumeObjectsFailed, err = dc.ReadUint64()
 			if err != nil {
-				err = msgp.WrapError(err, "ResumeItemsFailed")
-				return
-			}
-		case "ResumeItemsSkipped":
-			z.ResumeItemsSkipped, err = dc.ReadUint64()
-			if err != nil {
-				err = msgp.WrapError(err, "ResumeItemsSkipped")
+				err = msgp.WrapError(err, "ResumeObjectsFailed")
 				return
 			}
 		case "ResumeBytesDone":
@@ -148,12 +130,6 @@ func (z *healingTracker) DecodeMsg(dc *msgp.Reader) (err error) {
 			z.ResumeBytesFailed, err = dc.ReadUint64()
 			if err != nil {
 				err = msgp.WrapError(err, "ResumeBytesFailed")
-				return
-			}
-		case "ResumeBytesSkipped":
-			z.ResumeBytesSkipped, err = dc.ReadUint64()
-			if err != nil {
-				err = msgp.WrapError(err, "ResumeBytesSkipped")
 				return
 			}
 		case "QueuedBuckets":
@@ -194,36 +170,6 @@ func (z *healingTracker) DecodeMsg(dc *msgp.Reader) (err error) {
 					return
 				}
 			}
-		case "HealID":
-			z.HealID, err = dc.ReadString()
-			if err != nil {
-				err = msgp.WrapError(err, "HealID")
-				return
-			}
-		case "ItemsSkipped":
-			z.ItemsSkipped, err = dc.ReadUint64()
-			if err != nil {
-				err = msgp.WrapError(err, "ItemsSkipped")
-				return
-			}
-		case "BytesSkipped":
-			z.BytesSkipped, err = dc.ReadUint64()
-			if err != nil {
-				err = msgp.WrapError(err, "BytesSkipped")
-				return
-			}
-		case "RetryAttempts":
-			z.RetryAttempts, err = dc.ReadUint64()
-			if err != nil {
-				err = msgp.WrapError(err, "RetryAttempts")
-				return
-			}
-		case "Finished":
-			z.Finished, err = dc.ReadBool()
-			if err != nil {
-				err = msgp.WrapError(err, "Finished")
-				return
-			}
 		default:
 			err = dc.Skip()
 			if err != nil {
@@ -237,9 +183,9 @@ func (z *healingTracker) DecodeMsg(dc *msgp.Reader) (err error) {
 
 // EncodeMsg implements msgp.Encodable
 func (z *healingTracker) EncodeMsg(en *msgp.Writer) (err error) {
-	// map header, size 29
+	// map header, size 20
 	// write "ID"
-	err = en.Append(0xde, 0x0, 0x1d, 0xa2, 0x49, 0x44)
+	err = en.Append(0xde, 0x0, 0x14, 0xa2, 0x49, 0x44)
 	if err != nil {
 		return
 	}
@@ -318,44 +264,24 @@ func (z *healingTracker) EncodeMsg(en *msgp.Writer) (err error) {
 		err = msgp.WrapError(err, "LastUpdate")
 		return
 	}
-	// write "ObjectsTotalCount"
-	err = en.Append(0xb1, 0x4f, 0x62, 0x6a, 0x65, 0x63, 0x74, 0x73, 0x54, 0x6f, 0x74, 0x61, 0x6c, 0x43, 0x6f, 0x75, 0x6e, 0x74)
+	// write "ObjectsHealed"
+	err = en.Append(0xad, 0x4f, 0x62, 0x6a, 0x65, 0x63, 0x74, 0x73, 0x48, 0x65, 0x61, 0x6c, 0x65, 0x64)
 	if err != nil {
 		return
 	}
-	err = en.WriteUint64(z.ObjectsTotalCount)
+	err = en.WriteUint64(z.ObjectsHealed)
 	if err != nil {
-		err = msgp.WrapError(err, "ObjectsTotalCount")
+		err = msgp.WrapError(err, "ObjectsHealed")
 		return
 	}
-	// write "ObjectsTotalSize"
-	err = en.Append(0xb0, 0x4f, 0x62, 0x6a, 0x65, 0x63, 0x74, 0x73, 0x54, 0x6f, 0x74, 0x61, 0x6c, 0x53, 0x69, 0x7a, 0x65)
-	if err != nil {
-		return
-	}
-	err = en.WriteUint64(z.ObjectsTotalSize)
-	if err != nil {
-		err = msgp.WrapError(err, "ObjectsTotalSize")
-		return
-	}
-	// write "ItemsHealed"
-	err = en.Append(0xab, 0x49, 0x74, 0x65, 0x6d, 0x73, 0x48, 0x65, 0x61, 0x6c, 0x65, 0x64)
+	// write "ObjectsFailed"
+	err = en.Append(0xad, 0x4f, 0x62, 0x6a, 0x65, 0x63, 0x74, 0x73, 0x46, 0x61, 0x69, 0x6c, 0x65, 0x64)
 	if err != nil {
 		return
 	}
-	err = en.WriteUint64(z.ItemsHealed)
+	err = en.WriteUint64(z.ObjectsFailed)
 	if err != nil {
-		err = msgp.WrapError(err, "ItemsHealed")
-		return
-	}
-	// write "ItemsFailed"
-	err = en.Append(0xab, 0x49, 0x74, 0x65, 0x6d, 0x73, 0x46, 0x61, 0x69, 0x6c, 0x65, 0x64)
-	if err != nil {
-		return
-	}
-	err = en.WriteUint64(z.ItemsFailed)
-	if err != nil {
-		err = msgp.WrapError(err, "ItemsFailed")
+		err = msgp.WrapError(err, "ObjectsFailed")
 		return
 	}
 	// write "BytesDone"
@@ -398,34 +324,24 @@ func (z *healingTracker) EncodeMsg(en *msgp.Writer) (err error) {
 		err = msgp.WrapError(err, "Object")
 		return
 	}
-	// write "ResumeItemsHealed"
-	err = en.Append(0xb1, 0x52, 0x65, 0x73, 0x75, 0x6d, 0x65, 0x49, 0x74, 0x65, 0x6d, 0x73, 0x48, 0x65, 0x61, 0x6c, 0x65, 0x64)
+	// write "ResumeObjectsHealed"
+	err = en.Append(0xb3, 0x52, 0x65, 0x73, 0x75, 0x6d, 0x65, 0x4f, 0x62, 0x6a, 0x65, 0x63, 0x74, 0x73, 0x48, 0x65, 0x61, 0x6c, 0x65, 0x64)
 	if err != nil {
 		return
 	}
-	err = en.WriteUint64(z.ResumeItemsHealed)
+	err = en.WriteUint64(z.ResumeObjectsHealed)
 	if err != nil {
-		err = msgp.WrapError(err, "ResumeItemsHealed")
+		err = msgp.WrapError(err, "ResumeObjectsHealed")
 		return
 	}
-	// write "ResumeItemsFailed"
-	err = en.Append(0xb1, 0x52, 0x65, 0x73, 0x75, 0x6d, 0x65, 0x49, 0x74, 0x65, 0x6d, 0x73, 0x46, 0x61, 0x69, 0x6c, 0x65, 0x64)
-	if err != nil {
-		return
-	}
-	err = en.WriteUint64(z.ResumeItemsFailed)
-	if err != nil {
-		err = msgp.WrapError(err, "ResumeItemsFailed")
-		return
-	}
-	// write "ResumeItemsSkipped"
-	err = en.Append(0xb2, 0x52, 0x65, 0x73, 0x75, 0x6d, 0x65, 0x49, 0x74, 0x65, 0x6d, 0x73, 0x53, 0x6b, 0x69, 0x70, 0x70, 0x65, 0x64)
+	// write "ResumeObjectsFailed"
+	err = en.Append(0xb3, 0x52, 0x65, 0x73, 0x75, 0x6d, 0x65, 0x4f, 0x62, 0x6a, 0x65, 0x63, 0x74, 0x73, 0x46, 0x61, 0x69, 0x6c, 0x65, 0x64)
 	if err != nil {
 		return
 	}
-	err = en.WriteUint64(z.ResumeItemsSkipped)
+	err = en.WriteUint64(z.ResumeObjectsFailed)
 	if err != nil {
-		err = msgp.WrapError(err, "ResumeItemsSkipped")
+		err = msgp.WrapError(err, "ResumeObjectsFailed")
 		return
 	}
 	// write "ResumeBytesDone"
@@ -446,16 +362,6 @@ func (z *healingTracker) EncodeMsg(en *msgp.Writer) (err error) {
 	err = en.WriteUint64(z.ResumeBytesFailed)
 	if err != nil {
 		err = msgp.WrapError(err, "ResumeBytesFailed")
-		return
-	}
-	// write "ResumeBytesSkipped"
-	err = en.Append(0xb2, 0x52, 0x65, 0x73, 0x75, 0x6d, 0x65, 0x42, 0x79, 0x74, 0x65, 0x73, 0x53, 0x6b, 0x69, 0x70, 0x70, 0x65, 0x64)
-	if err != nil {
-		return
-	}
-	err = en.WriteUint64(z.ResumeBytesSkipped)
-	if err != nil {
-		err = msgp.WrapError(err, "ResumeBytesSkipped")
 		return
 	}
 	// write "QueuedBuckets"
@@ -492,65 +398,15 @@ func (z *healingTracker) EncodeMsg(en *msgp.Writer) (err error) {
 			return
 		}
 	}
-	// write "HealID"
-	err = en.Append(0xa6, 0x48, 0x65, 0x61, 0x6c, 0x49, 0x44)
-	if err != nil {
-		return
-	}
-	err = en.WriteString(z.HealID)
-	if err != nil {
-		err = msgp.WrapError(err, "HealID")
-		return
-	}
-	// write "ItemsSkipped"
-	err = en.Append(0xac, 0x49, 0x74, 0x65, 0x6d, 0x73, 0x53, 0x6b, 0x69, 0x70, 0x70, 0x65, 0x64)
-	if err != nil {
-		return
-	}
-	err = en.WriteUint64(z.ItemsSkipped)
-	if err != nil {
-		err = msgp.WrapError(err, "ItemsSkipped")
-		return
-	}
-	// write "BytesSkipped"
-	err = en.Append(0xac, 0x42, 0x79, 0x74, 0x65, 0x73, 0x53, 0x6b, 0x69, 0x70, 0x70, 0x65, 0x64)
-	if err != nil {
-		return
-	}
-	err = en.WriteUint64(z.BytesSkipped)
-	if err != nil {
-		err = msgp.WrapError(err, "BytesSkipped")
-		return
-	}
-	// write "RetryAttempts"
-	err = en.Append(0xad, 0x52, 0x65, 0x74, 0x72, 0x79, 0x41, 0x74, 0x74, 0x65, 0x6d, 0x70, 0x74, 0x73)
-	if err != nil {
-		return
-	}
-	err = en.WriteUint64(z.RetryAttempts)
-	if err != nil {
-		err = msgp.WrapError(err, "RetryAttempts")
-		return
-	}
-	// write "Finished"
-	err = en.Append(0xa8, 0x46, 0x69, 0x6e, 0x69, 0x73, 0x68, 0x65, 0x64)
-	if err != nil {
-		return
-	}
-	err = en.WriteBool(z.Finished)
-	if err != nil {
-		err = msgp.WrapError(err, "Finished")
-		return
-	}
 	return
 }
 
 // MarshalMsg implements msgp.Marshaler
 func (z *healingTracker) MarshalMsg(b []byte) (o []byte, err error) {
 	o = msgp.Require(b, z.Msgsize())
-	// map header, size 29
+	// map header, size 20
 	// string "ID"
-	o = append(o, 0xde, 0x0, 0x1d, 0xa2, 0x49, 0x44)
+	o = append(o, 0xde, 0x0, 0x14, 0xa2, 0x49, 0x44)
 	o = msgp.AppendString(o, z.ID)
 	// string "PoolIndex"
 	o = append(o, 0xa9, 0x50, 0x6f, 0x6f, 0x6c, 0x49, 0x6e, 0x64, 0x65, 0x78)
@@ -573,18 +429,12 @@ func (z *healingTracker) MarshalMsg(b []byte) (o []byte, err error) {
 	// string "LastUpdate"
 	o = append(o, 0xaa, 0x4c, 0x61, 0x73, 0x74, 0x55, 0x70, 0x64, 0x61, 0x74, 0x65)
 	o = msgp.AppendTime(o, z.LastUpdate)
-	// string "ObjectsTotalCount"
-	o = append(o, 0xb1, 0x4f, 0x62, 0x6a, 0x65, 0x63, 0x74, 0x73, 0x54, 0x6f, 0x74, 0x61, 0x6c, 0x43, 0x6f, 0x75, 0x6e, 0x74)
-	o = msgp.AppendUint64(o, z.ObjectsTotalCount)
-	// string "ObjectsTotalSize"
-	o = append(o, 0xb0, 0x4f, 0x62, 0x6a, 0x65, 0x63, 0x74, 0x73, 0x54, 0x6f, 0x74, 0x61, 0x6c, 0x53, 0x69, 0x7a, 0x65)
-	o = msgp.AppendUint64(o, z.ObjectsTotalSize)
-	// string "ItemsHealed"
-	o = append(o, 0xab, 0x49, 0x74, 0x65, 0x6d, 0x73, 0x48, 0x65, 0x61, 0x6c, 0x65, 0x64)
-	o = msgp.AppendUint64(o, z.ItemsHealed)
-	// string "ItemsFailed"
-	o = append(o, 0xab, 0x49, 0x74, 0x65, 0x6d, 0x73, 0x46, 0x61, 0x69, 0x6c, 0x65, 0x64)
-	o = msgp.AppendUint64(o, z.ItemsFailed)
+	// string "ObjectsHealed"
+	o = append(o, 0xad, 0x4f, 0x62, 0x6a, 0x65, 0x63, 0x74, 0x73, 0x48, 0x65, 0x61, 0x6c, 0x65, 0x64)
+	o = msgp.AppendUint64(o, z.ObjectsHealed)
+	// string "ObjectsFailed"
+	o = append(o, 0xad, 0x4f, 0x62, 0x6a, 0x65, 0x63, 0x74, 0x73, 0x46, 0x61, 0x69, 0x6c, 0x65, 0x64)
+	o = msgp.AppendUint64(o, z.ObjectsFailed)
 	// string "BytesDone"
 	o = append(o, 0xa9, 0x42, 0x79, 0x74, 0x65, 0x73, 0x44, 0x6f, 0x6e, 0x65)
 	o = msgp.AppendUint64(o, z.BytesDone)
@@ -597,24 +447,18 @@ func (z *healingTracker) MarshalMsg(b []byte) (o []byte, err error) {
 	// string "Object"
 	o = append(o, 0xa6, 0x4f, 0x62, 0x6a, 0x65, 0x63, 0x74)
 	o = msgp.AppendString(o, z.Object)
-	// string "ResumeItemsHealed"
-	o = append(o, 0xb1, 0x52, 0x65, 0x73, 0x75, 0x6d, 0x65, 0x49, 0x74, 0x65, 0x6d, 0x73, 0x48, 0x65, 0x61, 0x6c, 0x65, 0x64)
-	o = msgp.AppendUint64(o, z.ResumeItemsHealed)
-	// string "ResumeItemsFailed"
-	o = append(o, 0xb1, 0x52, 0x65, 0x73, 0x75, 0x6d, 0x65, 0x49, 0x74, 0x65, 0x6d, 0x73, 0x46, 0x61, 0x69, 0x6c, 0x65, 0x64)
-	o = msgp.AppendUint64(o, z.ResumeItemsFailed)
-	// string "ResumeItemsSkipped"
-	o = append(o, 0xb2, 0x52, 0x65, 0x73, 0x75, 0x6d, 0x65, 0x49, 0x74, 0x65, 0x6d, 0x73, 0x53, 0x6b, 0x69, 0x70, 0x70, 0x65, 0x64)
-	o = msgp.AppendUint64(o, z.ResumeItemsSkipped)
+	// string "ResumeObjectsHealed"
+	o = append(o, 0xb3, 0x52, 0x65, 0x73, 0x75, 0x6d, 0x65, 0x4f, 0x62, 0x6a, 0x65, 0x63, 0x74, 0x73, 0x48, 0x65, 0x61, 0x6c, 0x65, 0x64)
+	o = msgp.AppendUint64(o, z.ResumeObjectsHealed)
+	// string "ResumeObjectsFailed"
+	o = append(o, 0xb3, 0x52, 0x65, 0x73, 0x75, 0x6d, 0x65, 0x4f, 0x62, 0x6a, 0x65, 0x63, 0x74, 0x73, 0x46, 0x61, 0x69, 0x6c, 0x65, 0x64)
+	o = msgp.AppendUint64(o, z.ResumeObjectsFailed)
 	// string "ResumeBytesDone"
 	o = append(o, 0xaf, 0x52, 0x65, 0x73, 0x75, 0x6d, 0x65, 0x42, 0x79, 0x74, 0x65, 0x73, 0x44, 0x6f, 0x6e, 0x65)
 	o = msgp.AppendUint64(o, z.ResumeBytesDone)
 	// string "ResumeBytesFailed"
 	o = append(o, 0xb1, 0x52, 0x65, 0x73, 0x75, 0x6d, 0x65, 0x42, 0x79, 0x74, 0x65, 0x73, 0x46, 0x61, 0x69, 0x6c, 0x65, 0x64)
 	o = msgp.AppendUint64(o, z.ResumeBytesFailed)
-	// string "ResumeBytesSkipped"
-	o = append(o, 0xb2, 0x52, 0x65, 0x73, 0x75, 0x6d, 0x65, 0x42, 0x79, 0x74, 0x65, 0x73, 0x53, 0x6b, 0x69, 0x70, 0x70, 0x65, 0x64)
-	o = msgp.AppendUint64(o, z.ResumeBytesSkipped)
 	// string "QueuedBuckets"
 	o = append(o, 0xad, 0x51, 0x75, 0x65, 0x75, 0x65, 0x64, 0x42, 0x75, 0x63, 0x6b, 0x65, 0x74, 0x73)
 	o = msgp.AppendArrayHeader(o, uint32(len(z.QueuedBuckets)))
@@ -627,21 +471,6 @@ func (z *healingTracker) MarshalMsg(b []byte) (o []byte, err error) {
 	for za0002 := range z.HealedBuckets {
 		o = msgp.AppendString(o, z.HealedBuckets[za0002])
 	}
-	// string "HealID"
-	o = append(o, 0xa6, 0x48, 0x65, 0x61, 0x6c, 0x49, 0x44)
-	o = msgp.AppendString(o, z.HealID)
-	// string "ItemsSkipped"
-	o = append(o, 0xac, 0x49, 0x74, 0x65, 0x6d, 0x73, 0x53, 0x6b, 0x69, 0x70, 0x70, 0x65, 0x64)
-	o = msgp.AppendUint64(o, z.ItemsSkipped)
-	// string "BytesSkipped"
-	o = append(o, 0xac, 0x42, 0x79, 0x74, 0x65, 0x73, 0x53, 0x6b, 0x69, 0x70, 0x70, 0x65, 0x64)
-	o = msgp.AppendUint64(o, z.BytesSkipped)
-	// string "RetryAttempts"
-	o = append(o, 0xad, 0x52, 0x65, 0x74, 0x72, 0x79, 0x41, 0x74, 0x74, 0x65, 0x6d, 0x70, 0x74, 0x73)
-	o = msgp.AppendUint64(o, z.RetryAttempts)
-	// string "Finished"
-	o = append(o, 0xa8, 0x46, 0x69, 0x6e, 0x69, 0x73, 0x68, 0x65, 0x64)
-	o = msgp.AppendBool(o, z.Finished)
 	return
 }
 
@@ -711,28 +540,16 @@ func (z *healingTracker) UnmarshalMsg(bts []byte) (o []byte, err error) {
 				err = msgp.WrapError(err, "LastUpdate")
 				return
 			}
-		case "ObjectsTotalCount":
-			z.ObjectsTotalCount, bts, err = msgp.ReadUint64Bytes(bts)
+		case "ObjectsHealed":
+			z.ObjectsHealed, bts, err = msgp.ReadUint64Bytes(bts)
 			if err != nil {
-				err = msgp.WrapError(err, "ObjectsTotalCount")
+				err = msgp.WrapError(err, "ObjectsHealed")
 				return
 			}
-		case "ObjectsTotalSize":
-			z.ObjectsTotalSize, bts, err = msgp.ReadUint64Bytes(bts)
+		case "ObjectsFailed":
+			z.ObjectsFailed, bts, err = msgp.ReadUint64Bytes(bts)
 			if err != nil {
-				err = msgp.WrapError(err, "ObjectsTotalSize")
-				return
-			}
-		case "ItemsHealed":
-			z.ItemsHealed, bts, err = msgp.ReadUint64Bytes(bts)
-			if err != nil {
-				err = msgp.WrapError(err, "ItemsHealed")
-				return
-			}
-		case "ItemsFailed":
-			z.ItemsFailed, bts, err = msgp.ReadUint64Bytes(bts)
-			if err != nil {
-				err = msgp.WrapError(err, "ItemsFailed")
+				err = msgp.WrapError(err, "ObjectsFailed")
 				return
 			}
 		case "BytesDone":
@@ -759,22 +576,16 @@ func (z *healingTracker) UnmarshalMsg(bts []byte) (o []byte, err error) {
 				err = msgp.WrapError(err, "Object")
 				return
 			}
-		case "ResumeItemsHealed":
-			z.ResumeItemsHealed, bts, err = msgp.ReadUint64Bytes(bts)
+		case "ResumeObjectsHealed":
+			z.ResumeObjectsHealed, bts, err = msgp.ReadUint64Bytes(bts)
 			if err != nil {
-				err = msgp.WrapError(err, "ResumeItemsHealed")
+				err = msgp.WrapError(err, "ResumeObjectsHealed")
 				return
 			}
-		case "ResumeItemsFailed":
-			z.ResumeItemsFailed, bts, err = msgp.ReadUint64Bytes(bts)
+		case "ResumeObjectsFailed":
+			z.ResumeObjectsFailed, bts, err = msgp.ReadUint64Bytes(bts)
 			if err != nil {
-				err = msgp.WrapError(err, "ResumeItemsFailed")
-				return
-			}
-		case "ResumeItemsSkipped":
-			z.ResumeItemsSkipped, bts, err = msgp.ReadUint64Bytes(bts)
-			if err != nil {
-				err = msgp.WrapError(err, "ResumeItemsSkipped")
+				err = msgp.WrapError(err, "ResumeObjectsFailed")
 				return
 			}
 		case "ResumeBytesDone":
@@ -787,12 +598,6 @@ func (z *healingTracker) UnmarshalMsg(bts []byte) (o []byte, err error) {
 			z.ResumeBytesFailed, bts, err = msgp.ReadUint64Bytes(bts)
 			if err != nil {
 				err = msgp.WrapError(err, "ResumeBytesFailed")
-				return
-			}
-		case "ResumeBytesSkipped":
-			z.ResumeBytesSkipped, bts, err = msgp.ReadUint64Bytes(bts)
-			if err != nil {
-				err = msgp.WrapError(err, "ResumeBytesSkipped")
 				return
 			}
 		case "QueuedBuckets":
@@ -833,36 +638,6 @@ func (z *healingTracker) UnmarshalMsg(bts []byte) (o []byte, err error) {
 					return
 				}
 			}
-		case "HealID":
-			z.HealID, bts, err = msgp.ReadStringBytes(bts)
-			if err != nil {
-				err = msgp.WrapError(err, "HealID")
-				return
-			}
-		case "ItemsSkipped":
-			z.ItemsSkipped, bts, err = msgp.ReadUint64Bytes(bts)
-			if err != nil {
-				err = msgp.WrapError(err, "ItemsSkipped")
-				return
-			}
-		case "BytesSkipped":
-			z.BytesSkipped, bts, err = msgp.ReadUint64Bytes(bts)
-			if err != nil {
-				err = msgp.WrapError(err, "BytesSkipped")
-				return
-			}
-		case "RetryAttempts":
-			z.RetryAttempts, bts, err = msgp.ReadUint64Bytes(bts)
-			if err != nil {
-				err = msgp.WrapError(err, "RetryAttempts")
-				return
-			}
-		case "Finished":
-			z.Finished, bts, err = msgp.ReadBoolBytes(bts)
-			if err != nil {
-				err = msgp.WrapError(err, "Finished")
-				return
-			}
 		default:
 			bts, err = msgp.Skip(bts)
 			if err != nil {
@@ -877,7 +652,7 @@ func (z *healingTracker) UnmarshalMsg(bts []byte) (o []byte, err error) {
 
 // Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
 func (z *healingTracker) Msgsize() (s int) {
-	s = 3 + 3 + msgp.StringPrefixSize + len(z.ID) + 10 + msgp.IntSize + 9 + msgp.IntSize + 10 + msgp.IntSize + 5 + msgp.StringPrefixSize + len(z.Path) + 9 + msgp.StringPrefixSize + len(z.Endpoint) + 8 + msgp.TimeSize + 11 + msgp.TimeSize + 18 + msgp.Uint64Size + 17 + msgp.Uint64Size + 12 + msgp.Uint64Size + 12 + msgp.Uint64Size + 10 + msgp.Uint64Size + 12 + msgp.Uint64Size + 7 + msgp.StringPrefixSize + len(z.Bucket) + 7 + msgp.StringPrefixSize + len(z.Object) + 18 + msgp.Uint64Size + 18 + msgp.Uint64Size + 19 + msgp.Uint64Size + 16 + msgp.Uint64Size + 18 + msgp.Uint64Size + 19 + msgp.Uint64Size + 14 + msgp.ArrayHeaderSize
+	s = 3 + 3 + msgp.StringPrefixSize + len(z.ID) + 10 + msgp.IntSize + 9 + msgp.IntSize + 10 + msgp.IntSize + 5 + msgp.StringPrefixSize + len(z.Path) + 9 + msgp.StringPrefixSize + len(z.Endpoint) + 8 + msgp.TimeSize + 11 + msgp.TimeSize + 14 + msgp.Uint64Size + 14 + msgp.Uint64Size + 10 + msgp.Uint64Size + 12 + msgp.Uint64Size + 7 + msgp.StringPrefixSize + len(z.Bucket) + 7 + msgp.StringPrefixSize + len(z.Object) + 20 + msgp.Uint64Size + 20 + msgp.Uint64Size + 16 + msgp.Uint64Size + 18 + msgp.Uint64Size + 14 + msgp.ArrayHeaderSize
 	for za0001 := range z.QueuedBuckets {
 		s += msgp.StringPrefixSize + len(z.QueuedBuckets[za0001])
 	}
@@ -885,6 +660,5 @@ func (z *healingTracker) Msgsize() (s int) {
 	for za0002 := range z.HealedBuckets {
 		s += msgp.StringPrefixSize + len(z.HealedBuckets[za0002])
 	}
-	s += 7 + msgp.StringPrefixSize + len(z.HealID) + 13 + msgp.Uint64Size + 13 + msgp.Uint64Size + 14 + msgp.Uint64Size + 9 + msgp.BoolSize
 	return
 }

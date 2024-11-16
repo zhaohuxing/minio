@@ -1,42 +1,48 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2019 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
+	"fmt"
 	"hash"
 	"io"
-	"sync"
 
-	xhttp "github.com/minio/minio/internal/http"
-	"github.com/minio/minio/internal/ioutil"
-	"github.com/minio/minio/internal/ringbuffer"
+	"github.com/minio/minio/cmd/logger"
+	"github.com/minio/minio/pkg/ioutil"
 )
+
+type errHashMismatch struct {
+	message string
+}
+
+func (err *errHashMismatch) Error() string {
+	return err.message
+}
 
 // Calculates bitrot in chunks and writes the hash into the stream.
 type streamingBitrotWriter struct {
 	iow          io.WriteCloser
-	closeWithErr func(err error)
+	closeWithErr func(err error) error
 	h            hash.Hash
 	shardSize    int64
-	canClose     *sync.WaitGroup
-	byteBuf      []byte
+	canClose     chan struct{} // Needed to avoid race explained in Close() call.
 }
 
 func (b *streamingBitrotWriter) Write(p []byte) (int, error) {
@@ -48,26 +54,13 @@ func (b *streamingBitrotWriter) Write(p []byte) (int, error) {
 	hashBytes := b.h.Sum(nil)
 	_, err := b.iow.Write(hashBytes)
 	if err != nil {
-		b.closeWithErr(err)
 		return 0, err
 	}
-	n, err := b.iow.Write(p)
-	if err != nil {
-		b.closeWithErr(err)
-		return n, err
-	}
-	if n != len(p) {
-		err = io.ErrShortWrite
-		b.closeWithErr(err)
-	}
-	return n, err
+	return b.iow.Write(p)
 }
 
 func (b *streamingBitrotWriter) Close() error {
-	// Close the underlying writer.
-	// This will also flush the ring buffer if used.
 	err := b.iow.Close()
-
 	// Wait for all data to be written before returning else it causes race conditions.
 	// Race condition is because of io.PipeWriter implementation. i.e consider the following
 	// sequent of operations:
@@ -76,47 +69,31 @@ func (b *streamingBitrotWriter) Close() error {
 	// Now pipe.Close() can return before the data is read on the other end of the pipe and written to the disk
 	// Hence an immediate Read() on the file can return incorrect data.
 	if b.canClose != nil {
-		b.canClose.Wait()
-	}
-
-	// Recycle the buffer.
-	if b.byteBuf != nil {
-		globalBytePoolCap.Load().Put(b.byteBuf)
-		b.byteBuf = nil
+		<-b.canClose
 	}
 	return err
 }
 
-// newStreamingBitrotWriterBuffer returns streaming bitrot writer implementation.
-// The output is written to the supplied writer w.
-func newStreamingBitrotWriterBuffer(w io.Writer, algo BitrotAlgorithm, shardSize int64) io.Writer {
-	return &streamingBitrotWriter{iow: ioutil.NopCloser(w), h: algo.New(), shardSize: shardSize, canClose: nil, closeWithErr: func(err error) {}}
+// Returns streaming bitrot writer implementation.
+func newStreamingBitrotWriterBuffer(w io.Writer, algo BitrotAlgorithm, shardSize int64) io.WriteCloser {
+	return &streamingBitrotWriter{iow: ioutil.NopCloser(w), h: algo.New(), shardSize: shardSize, canClose: nil}
 }
 
 // Returns streaming bitrot writer implementation.
-func newStreamingBitrotWriter(disk StorageAPI, origvolume, volume, filePath string, length int64, algo BitrotAlgorithm, shardSize int64) io.Writer {
+func newStreamingBitrotWriter(disk StorageAPI, volume, filePath string, length int64, algo BitrotAlgorithm, shardSize int64, heal bool) io.Writer {
+	r, w := io.Pipe()
 	h := algo.New()
-	buf := globalBytePoolCap.Load().Get()
-	rb := ringbuffer.NewBuffer(buf[:cap(buf)]).SetBlocking(true)
 
-	bw := &streamingBitrotWriter{
-		iow:          ioutil.NewDeadlineWriter(rb.WriteCloser(), globalDriveConfig.GetMaxTimeout()),
-		closeWithErr: rb.CloseWithError,
-		h:            h,
-		shardSize:    shardSize,
-		canClose:     &sync.WaitGroup{},
-		byteBuf:      buf,
-	}
-	bw.canClose.Add(1)
+	bw := &streamingBitrotWriter{iow: w, closeWithErr: w.CloseWithError, h: h, shardSize: shardSize, canClose: make(chan struct{})}
+
 	go func() {
-		defer bw.canClose.Done()
-
 		totalFileSize := int64(-1) // For compressed objects length will be unknown (represented by length=-1)
 		if length != -1 {
 			bitrotSumsTotalSize := ceilFrac(length, shardSize) * int64(h.Size()) // Size used for storing bitrot checksums.
 			totalFileSize = bitrotSumsTotalSize + length
 		}
-		rb.CloseWithError(disk.CreateFile(context.TODO(), origvolume, volume, filePath, totalFileSize, rb))
+		r.CloseWithError(disk.CreateFile(context.TODO(), volume, filePath, totalFileSize, r))
+		close(bw.canClose)
 	}()
 	return bw
 }
@@ -140,8 +117,6 @@ func (b *streamingBitrotReader) Close() error {
 		return nil
 	}
 	if closer, ok := b.rc.(io.Closer); ok {
-		// drain the body for connection reuse at network layer.
-		xhttp.DrainBody(io.NopCloser(b.rc))
 		return closer.Close()
 	}
 	return nil
@@ -167,6 +142,7 @@ func (b *streamingBitrotReader) ReadAt(buf []byte, offset int64) (int, error) {
 			return 0, err
 		}
 	}
+
 	if offset != b.currOffset {
 		// Can never happen unless there are programmer bugs
 		return 0, errUnexpected
@@ -181,7 +157,10 @@ func (b *streamingBitrotReader) ReadAt(buf []byte, offset int64) (int, error) {
 		return 0, err
 	}
 	b.h.Write(buf)
+
 	if !bytes.Equal(b.h.Sum(nil), b.hashBytes) {
+		logger.LogIf(GlobalContext, fmt.Errorf("Disk: %s  -> %s/%s - content hash does not match - expected %s, got %s",
+			b.disk, b.volume, b.filePath, hex.EncodeToString(b.hashBytes), hex.EncodeToString(b.h.Sum(nil))))
 		return 0, errFileCorrupt
 	}
 	b.currOffset += int64(len(buf))

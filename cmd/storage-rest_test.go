@@ -1,38 +1,41 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2018 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
 import (
-	"bytes"
 	"context"
-	"errors"
-	"math/rand"
+	"io/ioutil"
+	"net/http/httptest"
+	"os"
 	"reflect"
-	"runtime"
 	"testing"
-	"time"
 
-	"github.com/minio/minio/internal/grid"
-	xnet "github.com/minio/pkg/v3/net"
+	"github.com/gorilla/mux"
+	"github.com/minio/minio/cmd/config"
+	xnet "github.com/minio/minio/pkg/net"
 )
 
+///////////////////////////////////////////////////////////////////////////////
+//
 // Storage REST server, storageRESTReceiver and StorageRESTClient are
 // inter-dependent, below test functions are sufficient to test all of them.
+//
+///////////////////////////////////////////////////////////////////////////////
+
 func testStorageAPIDiskInfo(t *testing.T, storage StorageAPI) {
 	testCases := []struct {
 		expectErr bool
@@ -41,7 +44,7 @@ func testStorageAPIDiskInfo(t *testing.T, storage StorageAPI) {
 	}
 
 	for i, testCase := range testCases {
-		_, err := storage.DiskInfo(context.Background(), DiskInfoOptions{Metrics: true})
+		_, err := storage.DiskInfo(context.Background())
 		expectErr := (err != nil)
 
 		if expectErr != testCase.expectErr {
@@ -53,8 +56,121 @@ func testStorageAPIDiskInfo(t *testing.T, storage StorageAPI) {
 	}
 }
 
-func testStorageAPIStatInfoFile(t *testing.T, storage StorageAPI) {
-	err := storage.AppendFile(context.Background(), "foo", pathJoin("myobject", xlStorageFormatFile), []byte("foo"))
+func testStorageAPIMakeVol(t *testing.T, storage StorageAPI) {
+	testCases := []struct {
+		volumeName string
+		expectErr  bool
+	}{
+		{"foo", false},
+		// volume exists error.
+		{"foo", true},
+	}
+
+	for i, testCase := range testCases {
+		err := storage.MakeVol(context.Background(), testCase.volumeName)
+		expectErr := (err != nil)
+
+		if expectErr != testCase.expectErr {
+			t.Fatalf("case %v: error: expected: %v, got: %v", i+1, testCase.expectErr, expectErr)
+		}
+	}
+}
+
+func testStorageAPIListVols(t *testing.T, storage StorageAPI) {
+	testCases := []struct {
+		volumeNames    []string
+		expectedResult []VolInfo
+		expectErr      bool
+	}{
+		{nil, []VolInfo{{Name: ".minio.sys"}}, false},
+		{[]string{"foo"}, []VolInfo{{Name: ".minio.sys"}, {Name: "foo"}}, false},
+	}
+
+	for i, testCase := range testCases {
+		for _, volumeName := range testCase.volumeNames {
+			err := storage.MakeVol(context.Background(), volumeName)
+			if err != nil {
+				t.Fatalf("unexpected error %v", err)
+			}
+		}
+
+		result, err := storage.ListVols(context.Background())
+		expectErr := (err != nil)
+
+		if expectErr != testCase.expectErr {
+			t.Fatalf("case %v: error: expected: %v, got: %v", i+1, testCase.expectErr, expectErr)
+		}
+
+		if !testCase.expectErr {
+			if len(result) != len(testCase.expectedResult) {
+				t.Fatalf("case %v: result: expected: %+v, got: %+v", i+1, testCase.expectedResult, result)
+			}
+		}
+	}
+}
+
+func testStorageAPIStatVol(t *testing.T, storage StorageAPI) {
+	err := storage.MakeVol(context.Background(), "foo")
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+
+	testCases := []struct {
+		volumeName string
+		expectErr  bool
+	}{
+		{"foo", false},
+		// volume not found error.
+		{"bar", true},
+	}
+
+	for i, testCase := range testCases {
+		result, err := storage.StatVol(context.Background(), testCase.volumeName)
+		expectErr := (err != nil)
+
+		if expectErr != testCase.expectErr {
+			t.Fatalf("case %v: error: expected: %v, got: %v", i+1, testCase.expectErr, expectErr)
+		}
+
+		if !testCase.expectErr {
+			if result.Name != testCase.volumeName {
+				t.Fatalf("case %v: result: expected: %+v, got: %+v", i+1, testCase.volumeName, result.Name)
+			}
+		}
+	}
+}
+
+func testStorageAPIDeleteVol(t *testing.T, storage StorageAPI) {
+	err := storage.MakeVol(context.Background(), "foo")
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+
+	testCases := []struct {
+		volumeName string
+		expectErr  bool
+	}{
+		{"foo", false},
+		// volume not found error.
+		{"bar", true},
+	}
+
+	for i, testCase := range testCases {
+		err := storage.DeleteVol(context.Background(), testCase.volumeName, false)
+		expectErr := (err != nil)
+
+		if expectErr != testCase.expectErr {
+			t.Fatalf("case %v: error: expected: %v, got: %v", i+1, testCase.expectErr, expectErr)
+		}
+	}
+}
+
+func testStorageAPICheckFile(t *testing.T, storage StorageAPI) {
+	err := storage.MakeVol(context.Background(), "foo")
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+	err = storage.AppendFile(context.Background(), "foo", pathJoin("myobject", xlStorageFormatFile), []byte("foo"))
 	if err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}
@@ -70,17 +186,21 @@ func testStorageAPIStatInfoFile(t *testing.T, storage StorageAPI) {
 	}
 
 	for i, testCase := range testCases {
-		_, err := storage.StatInfoFile(context.Background(), testCase.volumeName, testCase.objectName+"/"+xlStorageFormatFile, false)
+		err := storage.CheckFile(context.Background(), testCase.volumeName, testCase.objectName)
 		expectErr := (err != nil)
 
 		if expectErr != testCase.expectErr {
-			t.Fatalf("case %v: error: expected: %v, got: %v, err: %v", i+1, expectErr, testCase.expectErr, err)
+			t.Fatalf("case %v: error: expected: %v, got: %v", i+1, testCase.expectErr, expectErr)
 		}
 	}
 }
 
 func testStorageAPIListDir(t *testing.T, storage StorageAPI) {
-	err := storage.AppendFile(context.Background(), "foo", "path/to/myobject", []byte("foo"))
+	err := storage.MakeVol(context.Background(), "foo")
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+	err = storage.AppendFile(context.Background(), "foo", "path/to/myobject", []byte("foo"))
 	if err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}
@@ -97,7 +217,7 @@ func testStorageAPIListDir(t *testing.T, storage StorageAPI) {
 	}
 
 	for i, testCase := range testCases {
-		result, err := storage.ListDir(context.Background(), "", testCase.volumeName, testCase.prefix, -1)
+		result, err := storage.ListDir(context.Background(), testCase.volumeName, testCase.prefix, -1)
 		expectErr := (err != nil)
 
 		if expectErr != testCase.expectErr {
@@ -113,7 +233,11 @@ func testStorageAPIListDir(t *testing.T, storage StorageAPI) {
 }
 
 func testStorageAPIReadAll(t *testing.T, storage StorageAPI) {
-	err := storage.AppendFile(context.Background(), "foo", "myobject", []byte("foo"))
+	err := storage.MakeVol(context.Background(), "foo")
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+	err = storage.AppendFile(context.Background(), "foo", "myobject", []byte("foo"))
 	if err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}
@@ -146,7 +270,11 @@ func testStorageAPIReadAll(t *testing.T, storage StorageAPI) {
 }
 
 func testStorageAPIReadFile(t *testing.T, storage StorageAPI) {
-	err := storage.AppendFile(context.Background(), "foo", "myobject", []byte("foo"))
+	err := storage.MakeVol(context.Background(), "foo")
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+	err = storage.AppendFile(context.Background(), "foo", "myobject", []byte("foo"))
 	if err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}
@@ -183,54 +311,40 @@ func testStorageAPIReadFile(t *testing.T, storage StorageAPI) {
 }
 
 func testStorageAPIAppendFile(t *testing.T, storage StorageAPI) {
-	testData := []byte("foo")
+	err := storage.MakeVol(context.Background(), "foo")
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+
 	testCases := []struct {
-		volumeName      string
-		objectName      string
-		data            []byte
-		expectErr       bool
-		ignoreIfWindows bool
+		volumeName string
+		objectName string
+		data       []byte
+		expectErr  bool
 	}{
-		{"foo", "myobject", testData, false, false},
-		{"foo", "myobject-0byte", []byte{}, false, false},
+		{"foo", "myobject", []byte("foo"), false},
+		{"foo", "myobject", []byte{}, false},
 		// volume not found error.
-		{"foo-bar", "myobject", testData, true, false},
-		// Test some weird characters over the wire.
-		{"foo", "newline\n", testData, false, true},
-		{"foo", "newline\t", testData, false, true},
-		{"foo", "newline \n", testData, false, true},
-		{"foo", "newline$$$\n", testData, false, true},
-		{"foo", "newline%%%\n", testData, false, true},
-		{"foo", "newline \t % $ & * ^ # @ \n", testData, false, true},
-		{"foo", "\n\tnewline \t % $ & * ^ # @ \n", testData, false, true},
+		{"bar", "myobject", []byte{}, true},
 	}
 
 	for i, testCase := range testCases {
-		if testCase.ignoreIfWindows && runtime.GOOS == "windows" {
-			continue
-		}
 		err := storage.AppendFile(context.Background(), testCase.volumeName, testCase.objectName, testCase.data)
 		expectErr := (err != nil)
 
 		if expectErr != testCase.expectErr {
 			t.Fatalf("case %v: error: expected: %v, got: %v", i+1, testCase.expectErr, expectErr)
 		}
-
-		if !testCase.expectErr {
-			data, err := storage.ReadAll(context.Background(), testCase.volumeName, testCase.objectName)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			if !bytes.Equal(data, testCase.data) {
-				t.Fatalf("case %v: expected %v, got %v", i+1, testCase.data, data)
-			}
-		}
 	}
 }
 
 func testStorageAPIDeleteFile(t *testing.T, storage StorageAPI) {
-	err := storage.AppendFile(context.Background(), "foo", "myobject", []byte("foo"))
+	err := storage.MakeVol(context.Background(), "foo")
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+
+	err = storage.AppendFile(context.Background(), "foo", "myobject", []byte("foo"))
 	if err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}
@@ -241,17 +355,14 @@ func testStorageAPIDeleteFile(t *testing.T, storage StorageAPI) {
 		expectErr  bool
 	}{
 		{"foo", "myobject", false},
-		// file not found not returned
-		{"foo", "myobject", false},
-		// file not found not returned
-		{"foo", "yourobject", false},
+		// should removed by above case.
+		{"foo", "myobject", true},
+		// file not found error
+		{"foo", "yourobject", true},
 	}
 
 	for i, testCase := range testCases {
-		err := storage.Delete(context.Background(), testCase.volumeName, testCase.objectName, DeleteOptions{
-			Recursive: false,
-			Immediate: false,
-		})
+		err := storage.Delete(context.Background(), testCase.volumeName, testCase.objectName, false)
 		expectErr := (err != nil)
 
 		if expectErr != testCase.expectErr {
@@ -261,7 +372,17 @@ func testStorageAPIDeleteFile(t *testing.T, storage StorageAPI) {
 }
 
 func testStorageAPIRenameFile(t *testing.T, storage StorageAPI) {
-	err := storage.AppendFile(context.Background(), "foo", "myobject", []byte("foo"))
+	err := storage.MakeVol(context.Background(), "foo")
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+
+	err = storage.MakeVol(context.Background(), "bar")
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+
+	err = storage.AppendFile(context.Background(), "foo", "myobject", []byte("foo"))
 	if err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}
@@ -294,28 +415,27 @@ func testStorageAPIRenameFile(t *testing.T, storage StorageAPI) {
 	}
 }
 
-func newStorageRESTHTTPServerClient(t testing.TB) *storageRESTClient {
-	// Grid with 2 hosts
-	tg, err := grid.SetupTestGrid(2)
-	if err != nil {
-		t.Fatalf("SetupTestGrid: %v", err)
-	}
-	t.Cleanup(tg.Cleanup)
+func newStorageRESTHTTPServerClient(t *testing.T) (*httptest.Server, *storageRESTClient, config.Config, string) {
 	prevHost, prevPort := globalMinioHost, globalMinioPort
 	defer func() {
 		globalMinioHost, globalMinioPort = prevHost, prevPort
 	}()
-	// tg[0] = local, tg[1] = remote
 
-	// Remote URL
-	url, err := xnet.ParseHTTPURL(tg.Servers[1].URL)
+	endpointPath, err := ioutil.TempDir("", ".TestStorageREST.")
 	if err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}
-	url.Path = t.TempDir()
+
+	router := mux.NewRouter()
+	httpServer := httptest.NewServer(router)
+
+	url, err := xnet.ParseHTTPURL(httpServer.URL)
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+	url.Path = endpointPath
 
 	globalMinioHost, globalMinioPort = mustSplitHostPort(url.Host)
-	globalNodeAuthToken, _ = authenticateNode(globalActiveCred.AccessKey, globalActiveCred.SecretKey)
 
 	endpoint, err := NewEndpoint(url.String())
 	if err != nil {
@@ -326,89 +446,147 @@ func newStorageRESTHTTPServerClient(t testing.TB) *storageRESTClient {
 		t.Fatalf("UpdateIsLocal failed %v", err)
 	}
 
-	endpoint.PoolIdx = 0
-	endpoint.SetIdx = 0
-	endpoint.DiskIdx = 0
-
-	poolEps := []PoolEndpoints{{
+	registerStorageRESTHandlers(router, []PoolEndpoints{{
 		Endpoints: Endpoints{endpoint},
-	}}
-	poolEps[0].SetCount = 1
-	poolEps[0].DrivesPerSet = 1
+	}})
 
-	// Register handlers on newly created servers
-	registerStorageRESTHandlers(tg.Mux[0], poolEps, tg.Managers[0])
-	registerStorageRESTHandlers(tg.Mux[1], poolEps, tg.Managers[1])
+	prevGlobalServerConfig := globalServerConfig
+	globalServerConfig = newServerConfig()
+	lookupConfigs(globalServerConfig, nil)
 
-	storage := globalLocalSetDrives[0][0][0]
-	if err = storage.MakeVol(context.Background(), "foo"); err != nil {
-		t.Fatalf("unexpected error %v", err)
-	}
+	restClient := newStorageRESTClient(endpoint, false)
 
-	if err = storage.MakeVol(context.Background(), "bar"); err != nil {
-		t.Fatalf("unexpected error %v", err)
-	}
-
-	restClient, err := newStorageRESTClient(endpoint, false, tg.Managers[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	for {
-		_, err := restClient.DiskInfo(context.Background(), DiskInfoOptions{})
-		if err == nil || errors.Is(err, errUnformattedDisk) {
-			break
-		}
-		time.Sleep(time.Duration(rand.Float64() * float64(100*time.Millisecond)))
-	}
-
-	return restClient
+	return httpServer, restClient, prevGlobalServerConfig, endpointPath
 }
 
 func TestStorageRESTClientDiskInfo(t *testing.T) {
-	restClient := newStorageRESTHTTPServerClient(t)
+	httpServer, restClient, prevGlobalServerConfig, endpointPath := newStorageRESTHTTPServerClient(t)
+	defer httpServer.Close()
+	defer func() {
+		globalServerConfig = prevGlobalServerConfig
+	}()
+	defer os.RemoveAll(endpointPath)
 
 	testStorageAPIDiskInfo(t, restClient)
 }
 
-func TestStorageRESTClientStatInfoFile(t *testing.T) {
-	restClient := newStorageRESTHTTPServerClient(t)
+func TestStorageRESTClientMakeVol(t *testing.T) {
+	httpServer, restClient, prevGlobalServerConfig, endpointPath := newStorageRESTHTTPServerClient(t)
+	defer httpServer.Close()
+	defer func() {
+		globalServerConfig = prevGlobalServerConfig
+	}()
+	defer os.RemoveAll(endpointPath)
 
-	testStorageAPIStatInfoFile(t, restClient)
+	testStorageAPIMakeVol(t, restClient)
+}
+
+func TestStorageRESTClientListVols(t *testing.T) {
+	httpServer, restClient, prevGlobalServerConfig, endpointPath := newStorageRESTHTTPServerClient(t)
+	defer httpServer.Close()
+	defer func() {
+		globalServerConfig = prevGlobalServerConfig
+	}()
+	defer os.RemoveAll(endpointPath)
+
+	testStorageAPIListVols(t, restClient)
+}
+
+func TestStorageRESTClientStatVol(t *testing.T) {
+	httpServer, restClient, prevGlobalServerConfig, endpointPath := newStorageRESTHTTPServerClient(t)
+	defer httpServer.Close()
+	defer func() {
+		globalServerConfig = prevGlobalServerConfig
+	}()
+	defer os.RemoveAll(endpointPath)
+
+	testStorageAPIStatVol(t, restClient)
+}
+
+func TestStorageRESTClientDeleteVol(t *testing.T) {
+	httpServer, restClient, prevGlobalServerConfig, endpointPath := newStorageRESTHTTPServerClient(t)
+	defer httpServer.Close()
+	defer func() {
+		globalServerConfig = prevGlobalServerConfig
+	}()
+	defer os.RemoveAll(endpointPath)
+
+	testStorageAPIDeleteVol(t, restClient)
+}
+
+func TestStorageRESTClientCheckFile(t *testing.T) {
+	httpServer, restClient, prevGlobalServerConfig, endpointPath := newStorageRESTHTTPServerClient(t)
+	defer httpServer.Close()
+	defer func() {
+		globalServerConfig = prevGlobalServerConfig
+	}()
+	defer os.RemoveAll(endpointPath)
+
+	testStorageAPICheckFile(t, restClient)
 }
 
 func TestStorageRESTClientListDir(t *testing.T) {
-	restClient := newStorageRESTHTTPServerClient(t)
+	httpServer, restClient, prevGlobalServerConfig, endpointPath := newStorageRESTHTTPServerClient(t)
+	defer httpServer.Close()
+	defer func() {
+		globalServerConfig = prevGlobalServerConfig
+	}()
+	defer os.RemoveAll(endpointPath)
 
 	testStorageAPIListDir(t, restClient)
 }
 
 func TestStorageRESTClientReadAll(t *testing.T) {
-	restClient := newStorageRESTHTTPServerClient(t)
+	httpServer, restClient, prevGlobalServerConfig, endpointPath := newStorageRESTHTTPServerClient(t)
+	defer httpServer.Close()
+	defer func() {
+		globalServerConfig = prevGlobalServerConfig
+	}()
+	defer os.RemoveAll(endpointPath)
 
 	testStorageAPIReadAll(t, restClient)
 }
 
 func TestStorageRESTClientReadFile(t *testing.T) {
-	restClient := newStorageRESTHTTPServerClient(t)
+	httpServer, restClient, prevGlobalServerConfig, endpointPath := newStorageRESTHTTPServerClient(t)
+	defer httpServer.Close()
+	defer func() {
+		globalServerConfig = prevGlobalServerConfig
+	}()
+	defer os.RemoveAll(endpointPath)
 
 	testStorageAPIReadFile(t, restClient)
 }
 
 func TestStorageRESTClientAppendFile(t *testing.T) {
-	restClient := newStorageRESTHTTPServerClient(t)
+	httpServer, restClient, prevGlobalServerConfig, endpointPath := newStorageRESTHTTPServerClient(t)
+	defer httpServer.Close()
+	defer func() {
+		globalServerConfig = prevGlobalServerConfig
+	}()
+	defer os.RemoveAll(endpointPath)
 
 	testStorageAPIAppendFile(t, restClient)
 }
 
 func TestStorageRESTClientDeleteFile(t *testing.T) {
-	restClient := newStorageRESTHTTPServerClient(t)
+	httpServer, restClient, prevGlobalServerConfig, endpointPath := newStorageRESTHTTPServerClient(t)
+	defer httpServer.Close()
+	defer func() {
+		globalServerConfig = prevGlobalServerConfig
+	}()
+	defer os.RemoveAll(endpointPath)
 
 	testStorageAPIDeleteFile(t, restClient)
 }
 
 func TestStorageRESTClientRenameFile(t *testing.T) {
-	restClient := newStorageRESTHTTPServerClient(t)
+	httpServer, restClient, prevGlobalServerConfig, endpointPath := newStorageRESTHTTPServerClient(t)
+	defer httpServer.Close()
+	defer func() {
+		globalServerConfig = prevGlobalServerConfig
+	}()
+	defer os.RemoveAll(endpointPath)
 
 	testStorageAPIRenameFile(t, restClient)
 }

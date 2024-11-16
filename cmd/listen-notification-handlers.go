@@ -1,35 +1,30 @@
-// Copyright (c) 2015-2023 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2020 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http"
-	"strconv"
 	"time"
 
-	"github.com/minio/minio/internal/event"
-	"github.com/minio/minio/internal/grid"
-	"github.com/minio/minio/internal/logger"
-	"github.com/minio/minio/internal/pubsub"
-	"github.com/minio/mux"
-	"github.com/minio/pkg/v3/policy"
+	"github.com/gorilla/mux"
+	"github.com/minio/minio/cmd/logger"
+	policy "github.com/minio/minio/pkg/bucket/policy"
+	"github.com/minio/minio/pkg/event"
 )
 
 func (api objectAPIHandlers) ListenNotificationHandler(w http.ResponseWriter, r *http.Request) {
@@ -40,7 +35,17 @@ func (api objectAPIHandlers) ListenNotificationHandler(w http.ResponseWriter, r 
 	// Validate if bucket exists.
 	objAPI := api.ObjectAPI()
 	if objAPI == nil {
-		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrServerNotInitialized), r.URL)
+		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrServerNotInitialized), r.URL, guessIsBrowserReq(r))
+		return
+	}
+
+	if !objAPI.IsNotificationSupported() {
+		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrNotImplemented), r.URL, guessIsBrowserReq(r))
+		return
+	}
+
+	if !objAPI.IsListenSupported() {
+		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrNotImplemented), r.URL, guessIsBrowserReq(r))
 		return
 	}
 
@@ -49,27 +54,27 @@ func (api objectAPIHandlers) ListenNotificationHandler(w http.ResponseWriter, r 
 
 	if bucketName == "" {
 		if s3Error := checkRequestAuthType(ctx, r, policy.ListenNotificationAction, bucketName, ""); s3Error != ErrNone {
-			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)
+			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL, guessIsBrowserReq(r))
 			return
 		}
 	} else {
 		if s3Error := checkRequestAuthType(ctx, r, policy.ListenBucketNotificationAction, bucketName, ""); s3Error != ErrNone {
-			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)
+			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL, guessIsBrowserReq(r))
 			return
 		}
 	}
 
-	values := r.Form
+	values := r.URL.Query()
 
 	var prefix string
 	if len(values[peerRESTListenPrefix]) > 1 {
-		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrFilterNamePrefix), r.URL)
+		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrFilterNamePrefix), r.URL, guessIsBrowserReq(r))
 		return
 	}
 
 	if len(values[peerRESTListenPrefix]) == 1 {
 		if err := event.ValidateFilterRuleValue(values[peerRESTListenPrefix][0]); err != nil {
-			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL, guessIsBrowserReq(r))
 			return
 		}
 
@@ -78,13 +83,13 @@ func (api objectAPIHandlers) ListenNotificationHandler(w http.ResponseWriter, r 
 
 	var suffix string
 	if len(values[peerRESTListenSuffix]) > 1 {
-		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrFilterNameSuffix), r.URL)
+		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrFilterNameSuffix), r.URL, guessIsBrowserReq(r))
 		return
 	}
 
 	if len(values[peerRESTListenSuffix]) == 1 {
 		if err := event.ValidateFilterRuleValue(values[peerRESTListenSuffix][0]); err != nil {
-			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL, guessIsBrowserReq(r))
 			return
 		}
 
@@ -94,20 +99,19 @@ func (api objectAPIHandlers) ListenNotificationHandler(w http.ResponseWriter, r 
 	pattern := event.NewPattern(prefix, suffix)
 
 	var eventNames []event.Name
-	var mask pubsub.Mask
 	for _, s := range values[peerRESTListenEvents] {
 		eventName, err := event.ParseName(s)
 		if err != nil {
-			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL, guessIsBrowserReq(r))
 			return
 		}
-		mask.MergeMaskable(eventName)
+
 		eventNames = append(eventNames, eventName)
 	}
 
 	if bucketName != "" {
-		if _, err := objAPI.GetBucketInfo(ctx, bucketName, BucketOptions{}); err != nil {
-			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
+		if _, err := objAPI.GetBucketInfo(ctx, bucketName); err != nil {
+			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL, guessIsBrowserReq(r))
 			return
 		}
 	}
@@ -118,32 +122,15 @@ func (api objectAPIHandlers) ListenNotificationHandler(w http.ResponseWriter, r 
 
 	// Listen Publisher and peer-listen-client uses nonblocking send and hence does not wait for slow receivers.
 	// Use buffered channel to take care of burst sends or slow w.Write()
-	mergeCh := make(chan []byte, globalAPIConfig.getRequestsPoolCapacity()*len(globalEndpoints.Hostnames()))
-	localCh := make(chan event.Event, globalAPIConfig.getRequestsPoolCapacity())
+	listenCh := make(chan interface{}, 4000)
 
-	// Convert local messages to JSON and send to mergeCh
-	go func() {
-		buf := bytes.NewBuffer(grid.GetByteBuffer()[:0])
-		enc := json.NewEncoder(buf)
-		tmpEvt := struct{ Records []event.Event }{[]event.Event{{}}}
-		for {
-			select {
-			case ev := <-localCh:
-				buf.Reset()
-				tmpEvt.Records[0] = ev
-				if err := enc.Encode(tmpEvt); err != nil {
-					bugLogIf(ctx, err, "event: Encode failed")
-					continue
-				}
-				mergeCh <- append(grid.GetByteBuffer()[:0], buf.Bytes()...)
-			case <-ctx.Done():
-				grid.PutByteBuffer(buf.Bytes())
-				return
-			}
-		}
-	}()
 	peers, _ := newPeerRestClients(globalEndpoints)
-	err := globalHTTPListen.Subscribe(mask, localCh, ctx.Done(), func(ev event.Event) bool {
+
+	globalHTTPListen.Subscribe(listenCh, ctx.Done(), func(evI interface{}) bool {
+		ev, ok := evI.(event.Event)
+		if !ok {
+			return false
+		}
 		if ev.S3.Bucket.Name != "" && bucketName != "" {
 			if ev.S3.Bucket.Name != bucketName {
 				return false
@@ -151,10 +138,7 @@ func (api objectAPIHandlers) ListenNotificationHandler(w http.ResponseWriter, r 
 		}
 		return rulesMap.MatchSimple(ev.EventName, ev.S3.Object.Key)
 	})
-	if err != nil {
-		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
-		return
-	}
+
 	if bucketName != "" {
 		values.Set(peerRESTListenBucket, bucketName)
 	}
@@ -162,53 +146,28 @@ func (api objectAPIHandlers) ListenNotificationHandler(w http.ResponseWriter, r 
 		if peer == nil {
 			continue
 		}
-		peer.Listen(ctx, mergeCh, values)
+		peer.Listen(listenCh, ctx.Done(), values)
 	}
 
-	var (
-		emptyEventTicker <-chan time.Time
-		keepAliveTicker  <-chan time.Time
-	)
-
-	if p := values.Get("ping"); p != "" {
-		pingInterval, err := strconv.Atoi(p)
-		if err != nil {
-			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrInvalidQueryParams), r.URL)
-			return
-		}
-		if pingInterval < 1 {
-			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrInvalidQueryParams), r.URL)
-			return
-		}
-		t := time.NewTicker(time.Duration(pingInterval) * time.Second)
-		defer t.Stop()
-		emptyEventTicker = t.C
-	} else {
-		// Deprecated Apr 2023
-		t := time.NewTicker(500 * time.Millisecond)
-		defer t.Stop()
-		keepAliveTicker = t.C
-	}
+	keepAliveTicker := time.NewTicker(500 * time.Millisecond)
+	defer keepAliveTicker.Stop()
 
 	enc := json.NewEncoder(w)
 	for {
 		select {
-		case ev := <-mergeCh:
-			_, err := w.Write(ev)
-			if err != nil {
-				return
-			}
-			if len(mergeCh) == 0 {
-				// Flush if nothing is queued
-				w.(http.Flusher).Flush()
-			}
-			grid.PutByteBuffer(ev)
-		case <-emptyEventTicker:
-			if err := enc.Encode(struct{ Records []event.Event }{}); err != nil {
-				return
+		case evI := <-listenCh:
+			ev, ok := evI.(event.Event)
+			if ok {
+				if err := enc.Encode(struct{ Records []event.Event }{[]event.Event{ev}}); err != nil {
+					return
+				}
+			} else {
+				if _, err := w.Write([]byte(" ")); err != nil {
+					return
+				}
 			}
 			w.(http.Flusher).Flush()
-		case <-keepAliveTicker:
+		case <-keepAliveTicker.C:
 			if _, err := w.Write([]byte(" ")); err != nil {
 				return
 			}

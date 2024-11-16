@@ -1,88 +1,87 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2015, 2016 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
 import (
 	"net/http"
 
-	"github.com/minio/minio/internal/grid"
-	"github.com/minio/mux"
+	"github.com/gorilla/mux"
 )
 
 // Composed function registering routers for only distributed Erasure setup.
 func registerDistErasureRouters(router *mux.Router, endpointServerPools EndpointServerPools) {
-	var (
-		lockGrid   = globalLockGrid.Load()
-		commonGrid = globalGrid.Load()
-	)
-
 	// Register storage REST router only if its a distributed setup.
-	registerStorageRESTHandlers(router, endpointServerPools, commonGrid)
+	registerStorageRESTHandlers(router, endpointServerPools)
 
 	// Register peer REST router only if its a distributed setup.
-	registerPeerRESTHandlers(router, commonGrid)
+	registerPeerRESTHandlers(router)
 
 	// Register bootstrap REST router for distributed setups.
-	registerBootstrapRESTHandlers(commonGrid)
+	registerBootstrapRESTHandlers(router)
 
 	// Register distributed namespace lock routers.
-	registerLockRESTHandlers(lockGrid)
-
-	// Add lock grid to router
-	router.Handle(grid.RouteLockPath, adminMiddleware(lockGrid.Handler(storageServerRequestValidate), noGZFlag, noObjLayerFlag))
-
-	// Add grid to router
-	router.Handle(grid.RoutePath, adminMiddleware(commonGrid.Handler(storageServerRequestValidate), noGZFlag, noObjLayerFlag))
+	registerLockRESTHandlers(router)
 }
 
-// List of some generic middlewares which are applied for all incoming requests.
-var globalMiddlewares = []mux.MiddlewareFunc{
-	// set x-amz-request-id header and others
-	addCustomHeadersMiddleware,
-	// The generic tracer needs to be the first middleware to catch all requests
-	// returned early by any other middleware (but after the middleware that
-	// sets the amz request id).
-	httpTracerMiddleware,
-	// Auth middleware verifies incoming authorization headers and routes them
-	// accordingly. Client receives a HTTP error for invalid/unsupported
-	// signatures.
-	//
+// List of some generic handlers which are applied for all incoming requests.
+var globalHandlers = []mux.MiddlewareFunc{
+	// filters HTTP headers which are treated as metadata and are reserved
+	// for internal use only.
+	filterReservedMetadata,
+	// Enforce rules specific for TLS requests
+	setSSETLSHandler,
+	// Auth handler verifies incoming authorization headers and
+	// routes them accordingly. Client receives a HTTP error for
+	// invalid/unsupported signatures.
+	setAuthHandler,
 	// Validates all incoming requests to have a valid date header.
-	setAuthMiddleware,
-	// Redirect some pre-defined browser request paths to a static location
-	// prefix.
-	setBrowserRedirectMiddleware,
-	// Adds 'crossdomain.xml' policy middleware to serve legacy flash clients.
-	setCrossDomainPolicyMiddleware,
-	// Limits all body and header sizes to a maximum fixed limit
-	setRequestLimitMiddleware,
+	setTimeValidityHandler,
+	// Adds cache control for all browser requests.
+	setBrowserCacheControlHandler,
+	// Validates if incoming request is for restricted buckets.
+	setReservedBucketHandler,
+	// Redirect some pre-defined browser request paths to a static location prefix.
+	setBrowserRedirectHandler,
+	// Adds 'crossdomain.xml' policy handler to serve legacy flash clients.
+	setCrossDomainPolicy,
+	// Limits all header sizes to a maximum fixed limit
+	setRequestHeaderSizeLimitHandler,
+	// Limits all requests size to a maximum fixed limit
+	setRequestSizeLimitHandler,
+	// Network statistics
+	setHTTPStatsHandler,
 	// Validate all the incoming requests.
-	setRequestValidityMiddleware,
-	// Add upload forwarding middleware for site replication
-	setUploadForwardingMiddleware,
-	// Add bucket forwarding middleware
-	setBucketForwardingMiddleware,
-	// Add new middlewares here.
+	setRequestValidityHandler,
+	// Forward path style requests to actual host in a bucket federated setup.
+	setBucketForwardingHandler,
+	// set HTTP security headers such as Content-Security-Policy.
+	addSecurityHeaders,
+	// set x-amz-request-id header.
+	addCustomHeaders,
+	// add redirect handler to redirect
+	// requests when object layer is not
+	// initialized.
+	setRedirectHandler,
+	// Add new handlers here.
 }
 
 // configureServer handler returns final handler for the http server.
 func configureServerHandler(endpointServerPools EndpointServerPools) (http.Handler, error) {
-	// Initialize router. `SkipClean(true)` stops minio/mux from
+	// Initialize router. `SkipClean(true)` stops gorilla/mux from
 	// normalizing URL path minio/minio#3256
 	router := mux.NewRouter().SkipClean(true).UseEncodedPath()
 
@@ -91,10 +90,17 @@ func configureServerHandler(endpointServerPools EndpointServerPools) (http.Handl
 		registerDistErasureRouters(router, endpointServerPools)
 	}
 
-	// Add Admin router, all APIs are enabled in server mode.
-	registerAdminRouter(router, true)
+	// Register web router when its enabled.
+	if globalBrowserEnabled {
+		if err := registerWebRouter(router); err != nil {
+			return nil, err
+		}
+	}
 
-	// Add healthCheck router
+	// Add Admin router, all APIs are enabled in server mode.
+	registerAdminRouter(router, true, true)
+
+	// Add healthcheck router
 	registerHealthCheckRouter(router)
 
 	// Add server metrics router
@@ -103,13 +109,10 @@ func configureServerHandler(endpointServerPools EndpointServerPools) (http.Handl
 	// Add STS router always.
 	registerSTSRouter(router)
 
-	// Add KMS router
-	registerKMSRouter(router)
-
 	// Add API router
 	registerAPIRouter(router)
 
-	router.Use(globalMiddlewares...)
+	router.Use(globalHandlers...)
 
 	return router, nil
 }

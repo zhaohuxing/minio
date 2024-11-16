@@ -1,32 +1,44 @@
-// Copyright (c) 2015-2021 MinIO, Inc.
-//
-// This file is part of MinIO Object Storage stack
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+/*
+ * MinIO Cloud Storage, (C) 2016, 2017, 2018 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package cmd
 
 import (
+	"crypto/x509"
 	"fmt"
 	"net"
-	"net/url"
+	"runtime"
 	"strings"
 
-	xnet "github.com/minio/pkg/v3/net"
+	humanize "github.com/dustin/go-humanize"
+	"github.com/minio/minio/cmd/config"
+	"github.com/minio/minio/cmd/logger"
+	color "github.com/minio/minio/pkg/color"
+	"github.com/minio/minio/pkg/madmin"
+	xnet "github.com/minio/minio/pkg/net"
+)
 
-	"github.com/minio/minio/internal/color"
-	"github.com/minio/minio/internal/logger"
+// Documentation links, these are part of message printing code.
+const (
+	mcQuickStartGuide     = "https://docs.min.io/docs/minio-client-quickstart-guide"
+	goQuickStartGuide     = "https://docs.min.io/docs/golang-client-quickstart-guide"
+	jsQuickStartGuide     = "https://docs.min.io/docs/javascript-client-quickstart-guide"
+	javaQuickStartGuide   = "https://docs.min.io/docs/java-client-quickstart-guide"
+	pyQuickStartGuide     = "https://docs.min.io/docs/python-client-quickstart-guide"
+	dotnetQuickStartGuide = "https://docs.min.io/docs/dotnet-client-quickstart-guide"
 )
 
 // generates format string depending on the string length and padding.
@@ -35,26 +47,31 @@ func getFormatStr(strLen int, padding int) string {
 	return "%" + formatStr
 }
 
+func mustGetStorageInfo(objAPI ObjectLayer) StorageInfo {
+	storageInfo, _ := objAPI.StorageInfo(GlobalContext)
+	return storageInfo
+}
+
 // Prints the formatted startup message.
 func printStartupMessage(apiEndpoints []string, err error) {
-	banner := strings.Repeat("-", len(MinioBannerName))
-	if globalIsDistErasure {
-		logger.Startup(color.Bold(banner))
-	}
-	logger.Startup(color.Bold(MinioBannerName))
 	if err != nil {
-		if globalConsoleSys != nil {
-			globalConsoleSys.Send(GlobalContext, fmt.Sprintf("Server startup failed with '%v', some features may be missing", err))
-		}
+		logStartupMessage(color.RedBold("Server startup failed with '%v'", err))
+		logStartupMessage(color.RedBold("Not all features may be available on this server"))
+		logStartupMessage(color.RedBold("Please use 'mc admin' commands to further investigate this issue"))
 	}
 
-	if !globalSubnetConfig.Registered() {
-		var builder strings.Builder
-		startupBanner(&builder)
-		logger.Startup(builder.String())
+	strippedAPIEndpoints := stripStandardPorts(apiEndpoints)
+	// If cache layer is enabled, print cache capacity.
+	cachedObjAPI := newCachedObjectLayerFn()
+	if cachedObjAPI != nil {
+		printCacheStorageInfo(cachedObjAPI.StorageInfo(GlobalContext))
 	}
 
-	strippedAPIEndpoints := stripStandardPorts(apiEndpoints, globalMinioHost)
+	// Object layer is initialized then print StorageInfo.
+	objAPI := newObjectLayerFn()
+	if objAPI != nil {
+		printStorageInfo(mustGetStorageInfo(objAPI))
+	}
 
 	// Prints credential, region and browser access.
 	printServerCommonMsg(strippedAPIEndpoints)
@@ -65,45 +82,43 @@ func printStartupMessage(apiEndpoints []string, err error) {
 
 	// Prints documentation message.
 	printObjectAPIMsg()
-	if globalIsDistErasure {
-		logger.Startup(color.Bold(banner))
+
+	// SSL is configured reads certification chain, prints
+	// authority and expiry.
+	if color.IsTerminal() && !globalCLIContext.Anonymous {
+		if globalIsTLS {
+			printCertificateMsg(globalPublicCerts)
+		}
 	}
 }
 
-// Returns true if input is IPv6
-func isIPv6(host string) bool {
+// Returns true if input is not IPv4, false if it is.
+func isNotIPv4(host string) bool {
 	h, _, err := net.SplitHostPort(host)
 	if err != nil {
 		h = host
 	}
 	ip := net.ParseIP(h)
-	return ip.To16() != nil && ip.To4() == nil
+	ok := ip.To4() != nil // This is always true of IP is IPv4
+
+	// Returns true if input is not IPv4.
+	return !ok
 }
 
 // strip api endpoints list with standard ports such as
 // port "80" and "443" before displaying on the startup
 // banner.  Returns a new list of API endpoints.
-func stripStandardPorts(apiEndpoints []string, host string) (newAPIEndpoints []string) {
-	if len(apiEndpoints) == 1 {
-		return apiEndpoints
-	}
+func stripStandardPorts(apiEndpoints []string) (newAPIEndpoints []string) {
 	newAPIEndpoints = make([]string, len(apiEndpoints))
 	// Check all API endpoints for standard ports and strip them.
 	for i, apiEndpoint := range apiEndpoints {
-		_, err := xnet.ParseHTTPURL(apiEndpoint)
+		u, err := xnet.ParseHTTPURL(apiEndpoint)
 		if err != nil {
 			continue
 		}
-		u, err := url.Parse(apiEndpoint)
-		if err != nil {
+		if globalMinioHost == "" && isNotIPv4(u.Host) {
+			// Skip all non-IPv4 endpoints when we bind to all interfaces.
 			continue
-		}
-		if host == "" && isIPv6(u.Hostname()) {
-			// Skip all IPv6 endpoints
-			continue
-		}
-		if u.Port() == "80" && u.Scheme == "http" || u.Port() == "443" && u.Scheme == "https" {
-			u.Host = u.Hostname()
 		}
 		newAPIEndpoints[i] = u.String()
 	}
@@ -116,47 +131,25 @@ func printServerCommonMsg(apiEndpoints []string) {
 	cred := globalActiveCred
 
 	// Get saved region.
-	region := globalSite.Region()
+	region := globalServerRegion
 
-	apiEndpointStr := strings.TrimSpace(strings.Join(apiEndpoints, "  "))
+	apiEndpointStr := strings.Join(apiEndpoints, "  ")
+
 	// Colorize the message and print.
-	logger.Startup(color.Blue("API: ") + color.Bold(fmt.Sprintf("%s ", apiEndpointStr)))
-	if color.IsTerminal() && (!globalServerCtxt.Anonymous && !globalServerCtxt.JSON && globalAPIConfig.permitRootAccess()) {
-		logger.Startup(color.Blue("   RootUser: ") + color.Bold("%s ", cred.AccessKey))
-		logger.Startup(color.Blue("   RootPass: ") + color.Bold("%s \n", cred.SecretKey))
+	logStartupMessage(color.Blue("Endpoint: ") + color.Bold(fmt.Sprintf("%s ", apiEndpointStr)))
+	if color.IsTerminal() && !globalCLIContext.Anonymous {
+		logStartupMessage(color.Blue("RootUser: ") + color.Bold(fmt.Sprintf("%s ", cred.AccessKey)))
+		logStartupMessage(color.Blue("RootPass: ") + color.Bold(fmt.Sprintf("%s ", cred.SecretKey)))
 		if region != "" {
-			logger.Startup(color.Blue("   Region: ") + color.Bold("%s", fmt.Sprintf(getFormatStr(len(region), 2), region)))
+			logStartupMessage(color.Blue("Region: ") + color.Bold(fmt.Sprintf(getFormatStr(len(region), 2), region)))
 		}
 	}
+	printEventNotifiers()
 
 	if globalBrowserEnabled {
-		consoleEndpointStr := strings.Join(stripStandardPorts(getConsoleEndpoints(), globalMinioConsoleHost), " ")
-		logger.Startup(color.Blue("WebUI: ") + color.Bold(fmt.Sprintf("%s ", consoleEndpointStr)))
-		if color.IsTerminal() && (!globalServerCtxt.Anonymous && !globalServerCtxt.JSON && globalAPIConfig.permitRootAccess()) {
-			logger.Startup(color.Blue("   RootUser: ") + color.Bold("%s ", cred.AccessKey))
-			logger.Startup(color.Blue("   RootPass: ") + color.Bold("%s ", cred.SecretKey))
-		}
+		logStartupMessage(color.Blue("\nBrowser Access:"))
+		logStartupMessage(fmt.Sprintf(getFormatStr(len(apiEndpointStr), 3), apiEndpointStr))
 	}
-
-	printEventNotifiers()
-	printLambdaTargets()
-}
-
-// Prints startup message for Object API access, prints link to our SDK documentation.
-func printObjectAPIMsg() {
-	logger.Startup(color.Blue("\nDocs: ") + "https://docs.min.io")
-}
-
-func printLambdaTargets() {
-	if globalLambdaTargetList == nil || globalLambdaTargetList.Empty() {
-		return
-	}
-
-	arnMsg := color.Blue("Object Lambda ARNs: ")
-	for _, arn := range globalLambdaTargetList.List(globalSite.Region()) {
-		arnMsg += color.Bold(fmt.Sprintf("%s ", arn))
-	}
-	logger.Startup(arnMsg + "\n")
 }
 
 // Prints bucket notification configurations.
@@ -165,7 +158,7 @@ func printEventNotifiers() {
 		return
 	}
 
-	arns := globalEventNotifier.GetARNList()
+	arns := globalNotificationSys.GetARNList(true)
 	if len(arns) == 0 {
 		return
 	}
@@ -175,7 +168,7 @@ func printEventNotifiers() {
 		arnMsg += color.Bold(fmt.Sprintf("%s ", arn))
 	}
 
-	logger.Startup(arnMsg + "\n")
+	logStartupMessage(arnMsg)
 }
 
 // Prints startup message for command line access. Prints link to our documentation
@@ -184,13 +177,70 @@ func printCLIAccessMsg(endPoint string, alias string) {
 	// Get saved credentials.
 	cred := globalActiveCred
 
-	const mcQuickStartGuide = "https://min.io/docs/minio/linux/reference/minio-mc.html#quickstart"
-
 	// Configure 'mc', following block prints platform specific information for minio client.
-	if color.IsTerminal() && (!globalServerCtxt.Anonymous && globalAPIConfig.permitRootAccess()) {
-		logger.Startup(color.Blue("\nCLI: ") + mcQuickStartGuide)
-		mcMessage := fmt.Sprintf("$ mc alias set '%s' '%s' '%s' '%s'", alias,
-			endPoint, cred.AccessKey, cred.SecretKey)
-		logger.Startup(fmt.Sprintf(getFormatStr(len(mcMessage), 3), mcMessage))
+	if color.IsTerminal() && !globalCLIContext.Anonymous {
+		logStartupMessage(color.Blue("\nCommand-line Access: ") + mcQuickStartGuide)
+		if runtime.GOOS == globalWindowsOSName {
+			mcMessage := fmt.Sprintf("$ mc.exe alias set %s %s %s %s", alias,
+				endPoint, cred.AccessKey, cred.SecretKey)
+			logStartupMessage(fmt.Sprintf(getFormatStr(len(mcMessage), 3), mcMessage))
+		} else {
+			mcMessage := fmt.Sprintf("$ mc alias set %s %s %s %s", alias,
+				endPoint, cred.AccessKey, cred.SecretKey)
+			logStartupMessage(fmt.Sprintf(getFormatStr(len(mcMessage), 3), mcMessage))
+		}
+	}
+}
+
+// Prints startup message for Object API acces, prints link to our SDK documentation.
+func printObjectAPIMsg() {
+	logStartupMessage(color.Blue("\nObject API (Amazon S3 compatible):"))
+	logStartupMessage(color.Blue("   Go: ") + fmt.Sprintf(getFormatStr(len(goQuickStartGuide), 8), goQuickStartGuide))
+	logStartupMessage(color.Blue("   Java: ") + fmt.Sprintf(getFormatStr(len(javaQuickStartGuide), 6), javaQuickStartGuide))
+	logStartupMessage(color.Blue("   Python: ") + fmt.Sprintf(getFormatStr(len(pyQuickStartGuide), 4), pyQuickStartGuide))
+	logStartupMessage(color.Blue("   JavaScript: ") + jsQuickStartGuide)
+	logStartupMessage(color.Blue("   .NET: ") + fmt.Sprintf(getFormatStr(len(dotnetQuickStartGuide), 6), dotnetQuickStartGuide))
+}
+
+// Get formatted disk/storage info message.
+func getStorageInfoMsg(storageInfo StorageInfo) string {
+	var msg string
+	var mcMessage string
+	onlineDisks, offlineDisks := getOnlineOfflineDisksStats(storageInfo.Disks)
+	if storageInfo.Backend.Type == madmin.Erasure {
+		if offlineDisks.Sum() > 0 {
+			mcMessage = "Use `mc admin info` to look for latest server/disk info\n"
+		}
+
+		diskInfo := fmt.Sprintf(" %d Online, %d Offline. ", onlineDisks.Sum(), offlineDisks.Sum())
+		msg += color.Blue("Status:") + fmt.Sprintf(getFormatStr(len(diskInfo), 8), diskInfo)
+		if len(mcMessage) > 0 {
+			msg = fmt.Sprintf("%s %s", mcMessage, msg)
+		}
+	}
+	return msg
+}
+
+// Prints startup message of storage capacity and erasure information.
+func printStorageInfo(storageInfo StorageInfo) {
+	if msg := getStorageInfoMsg(storageInfo); msg != "" {
+		if globalCLIContext.Quiet {
+			logger.Info(msg)
+		}
+		logStartupMessage(msg)
+	}
+}
+
+func printCacheStorageInfo(storageInfo CacheStorageInfo) {
+	msg := fmt.Sprintf("%s %s Free, %s Total", color.Blue("Cache Capacity:"),
+		humanize.IBytes(storageInfo.Free),
+		humanize.IBytes(storageInfo.Total))
+	logStartupMessage(msg)
+}
+
+// Prints the certificate expiry message.
+func printCertificateMsg(certs []*x509.Certificate) {
+	for _, cert := range certs {
+		logStartupMessage(config.CertificateText(cert))
 	}
 }
