@@ -49,6 +49,9 @@ var (
 	// ListObjects function alias.
 	ListObjects = listObjects
 
+	// ListObjects function alias.
+	ListObjects1 = listObjects1
+
 	// FilterListEntries function alias.
 	FilterListEntries = filterListEntries
 
