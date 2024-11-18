@@ -2,8 +2,6 @@ module github.com/zhaohuxing/minio
 
 go 1.18
 
-replace github.com/minio/minio => github.com/zhaohuxing/minio.git v1.0.1 
-
 require (
 	git.apache.org/thrift.git v0.13.0
 	github.com/VividCortex/ewma v1.1.1

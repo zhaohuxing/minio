@@ -30,9 +30,9 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/s2"
-	"github.com/minio/minio/cmd/logger"
-	"github.com/minio/minio/pkg/console"
-	"github.com/minio/minio/pkg/hash"
+	"github.com/zhaohuxing/minio/cmd/logger"
+	"github.com/zhaohuxing/minio/pkg/console"
+	"github.com/zhaohuxing/minio/pkg/hash"
 	"github.com/tinylib/msgp/msgp"
 )
 

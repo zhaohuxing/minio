@@ -21,8 +21,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/minio/minio/cmd/config"
-	"github.com/minio/minio/pkg/env"
+	"github.com/zhaohuxing/minio/cmd/config"
+	"github.com/zhaohuxing/minio/pkg/env"
 )
 
 // Compression environment variables

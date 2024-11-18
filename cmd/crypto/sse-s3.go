@@ -24,8 +24,8 @@ import (
 	"path"
 	"strings"
 
-	xhttp "github.com/minio/minio/cmd/http"
-	"github.com/minio/minio/cmd/logger"
+	xhttp "github.com/zhaohuxing/minio/cmd/http"
+	"github.com/zhaohuxing/minio/cmd/logger"
 )
 
 type sses3 struct{}

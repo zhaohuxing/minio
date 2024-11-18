@@ -26,18 +26,18 @@ import (
 
 	minio "github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/tags"
-	"github.com/minio/minio/cmd/config/dns"
-	"github.com/minio/minio/cmd/crypto"
-	"github.com/minio/minio/cmd/logger"
-	"github.com/minio/minio/pkg/auth"
-	"github.com/minio/minio/pkg/bucket/lifecycle"
-	"github.com/minio/minio/pkg/bucket/replication"
+	"github.com/zhaohuxing/minio/cmd/config/dns"
+	"github.com/zhaohuxing/minio/cmd/crypto"
+	"github.com/zhaohuxing/minio/cmd/logger"
+	"github.com/zhaohuxing/minio/pkg/auth"
+	"github.com/zhaohuxing/minio/pkg/bucket/lifecycle"
+	"github.com/zhaohuxing/minio/pkg/bucket/replication"
 
-	objectlock "github.com/minio/minio/pkg/bucket/object/lock"
-	"github.com/minio/minio/pkg/bucket/policy"
-	"github.com/minio/minio/pkg/bucket/versioning"
-	"github.com/minio/minio/pkg/event"
-	"github.com/minio/minio/pkg/hash"
+	objectlock "github.com/zhaohuxing/minio/pkg/bucket/object/lock"
+	"github.com/zhaohuxing/minio/pkg/bucket/policy"
+	"github.com/zhaohuxing/minio/pkg/bucket/versioning"
+	"github.com/zhaohuxing/minio/pkg/event"
+	"github.com/zhaohuxing/minio/pkg/hash"
 )
 
 // APIError structure
@@ -241,7 +241,7 @@ const (
 	ErrInvalidStorageClass
 	ErrBackendDown
 	// Add new extended error codes here.
-	// Please open a https://github.com/minio/minio/issues before adding
+	// Please open a https://github.com/zhaohuxing/minio/issues before adding
 	// new error codes here.
 
 	ErrMalformedJSON

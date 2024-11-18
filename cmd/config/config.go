@@ -25,9 +25,9 @@ import (
 	"strings"
 
 	"github.com/minio/minio-go/v7/pkg/set"
-	"github.com/minio/minio/pkg/auth"
-	"github.com/minio/minio/pkg/env"
-	"github.com/minio/minio/pkg/madmin"
+	"github.com/zhaohuxing/minio/pkg/auth"
+	"github.com/zhaohuxing/minio/pkg/env"
+	"github.com/zhaohuxing/minio/pkg/madmin"
 )
 
 // Error config error type

@@ -34,13 +34,13 @@ import (
 	"time"
 
 	"github.com/djherbis/atime"
-	"github.com/minio/minio/cmd/config/cache"
-	"github.com/minio/minio/cmd/crypto"
-	xhttp "github.com/minio/minio/cmd/http"
-	"github.com/minio/minio/cmd/logger"
-	"github.com/minio/minio/pkg/disk"
-	"github.com/minio/minio/pkg/fips"
-	"github.com/minio/minio/pkg/kms"
+	"github.com/zhaohuxing/minio/cmd/config/cache"
+	"github.com/zhaohuxing/minio/cmd/crypto"
+	xhttp "github.com/zhaohuxing/minio/cmd/http"
+	"github.com/zhaohuxing/minio/cmd/logger"
+	"github.com/zhaohuxing/minio/pkg/disk"
+	"github.com/zhaohuxing/minio/pkg/fips"
+	"github.com/zhaohuxing/minio/pkg/kms"
 	"github.com/minio/sio"
 )
 

@@ -17,8 +17,8 @@
 package notify
 
 import (
-	"github.com/minio/minio/cmd/config"
-	"github.com/minio/minio/pkg/event/target"
+	"github.com/zhaohuxing/minio/cmd/config"
+	"github.com/zhaohuxing/minio/pkg/event/target"
 )
 
 const (

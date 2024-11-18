@@ -19,18 +19,18 @@ package cmd
 import (
 	"sync"
 
-	"github.com/minio/minio/cmd/config"
-	"github.com/minio/minio/cmd/config/cache"
-	"github.com/minio/minio/cmd/config/compress"
-	xldap "github.com/minio/minio/cmd/config/identity/ldap"
-	"github.com/minio/minio/cmd/config/identity/openid"
-	"github.com/minio/minio/cmd/config/notify"
-	"github.com/minio/minio/cmd/config/policy/opa"
-	"github.com/minio/minio/cmd/config/storageclass"
-	"github.com/minio/minio/cmd/logger"
-	"github.com/minio/minio/pkg/auth"
-	"github.com/minio/minio/pkg/event/target"
-	"github.com/minio/minio/pkg/quick"
+	"github.com/zhaohuxing/minio/cmd/config"
+	"github.com/zhaohuxing/minio/cmd/config/cache"
+	"github.com/zhaohuxing/minio/cmd/config/compress"
+	xldap "github.com/zhaohuxing/minio/cmd/config/identity/ldap"
+	"github.com/zhaohuxing/minio/cmd/config/identity/openid"
+	"github.com/zhaohuxing/minio/cmd/config/notify"
+	"github.com/zhaohuxing/minio/cmd/config/policy/opa"
+	"github.com/zhaohuxing/minio/cmd/config/storageclass"
+	"github.com/zhaohuxing/minio/cmd/logger"
+	"github.com/zhaohuxing/minio/pkg/auth"
+	"github.com/zhaohuxing/minio/pkg/event/target"
+	"github.com/zhaohuxing/minio/pkg/quick"
 )
 
 // ///////////////// Config V1 ///////////////////

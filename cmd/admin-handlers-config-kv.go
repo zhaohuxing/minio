@@ -26,16 +26,16 @@ import (
 	"strings"
 
 	"github.com/gorilla/mux"
-	"github.com/minio/minio/cmd/config"
-	"github.com/minio/minio/cmd/config/cache"
-	xldap "github.com/minio/minio/cmd/config/identity/ldap"
-	"github.com/minio/minio/cmd/config/identity/openid"
-	"github.com/minio/minio/cmd/config/policy/opa"
-	"github.com/minio/minio/cmd/config/storageclass"
-	"github.com/minio/minio/cmd/logger"
-	"github.com/minio/minio/pkg/auth"
-	iampolicy "github.com/minio/minio/pkg/iam/policy"
-	"github.com/minio/minio/pkg/madmin"
+	"github.com/zhaohuxing/minio/cmd/config"
+	"github.com/zhaohuxing/minio/cmd/config/cache"
+	xldap "github.com/zhaohuxing/minio/cmd/config/identity/ldap"
+	"github.com/zhaohuxing/minio/cmd/config/identity/openid"
+	"github.com/zhaohuxing/minio/cmd/config/policy/opa"
+	"github.com/zhaohuxing/minio/cmd/config/storageclass"
+	"github.com/zhaohuxing/minio/cmd/logger"
+	"github.com/zhaohuxing/minio/pkg/auth"
+	iampolicy "github.com/zhaohuxing/minio/pkg/iam/policy"
+	"github.com/zhaohuxing/minio/pkg/madmin"
 )
 
 func validateAdminReqConfigKV(ctx context.Context, w http.ResponseWriter, r *http.Request) (auth.Credentials, ObjectLayer) {

@@ -26,11 +26,11 @@ import (
 	"sort"
 
 	"github.com/gorilla/mux"
-	"github.com/minio/minio/cmd/config/dns"
-	"github.com/minio/minio/cmd/logger"
-	"github.com/minio/minio/pkg/auth"
-	iampolicy "github.com/minio/minio/pkg/iam/policy"
-	"github.com/minio/minio/pkg/madmin"
+	"github.com/zhaohuxing/minio/cmd/config/dns"
+	"github.com/zhaohuxing/minio/cmd/logger"
+	"github.com/zhaohuxing/minio/pkg/auth"
+	iampolicy "github.com/zhaohuxing/minio/pkg/iam/policy"
+	"github.com/zhaohuxing/minio/pkg/madmin"
 )
 
 func validateAdminUsersReq(ctx context.Context, w http.ResponseWriter, r *http.Request, action iampolicy.AdminAction) (ObjectLayer, auth.Credentials) {

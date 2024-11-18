@@ -27,7 +27,7 @@ import (
 
 	jsoniter "github.com/json-iterator/go"
 	"github.com/klauspost/compress/s2"
-	"github.com/minio/minio/cmd/logger"
+	"github.com/zhaohuxing/minio/cmd/logger"
 	"github.com/tinylib/msgp/msgp"
 )
 

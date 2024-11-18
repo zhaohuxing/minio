@@ -21,11 +21,11 @@ import (
 	"context"
 	"sync"
 
-	"github.com/minio/minio/cmd/logger"
-	"github.com/minio/minio/cmd/logger/message/log"
-	"github.com/minio/minio/cmd/logger/target/console"
-	xnet "github.com/minio/minio/pkg/net"
-	"github.com/minio/minio/pkg/pubsub"
+	"github.com/zhaohuxing/minio/cmd/logger"
+	"github.com/zhaohuxing/minio/cmd/logger/message/log"
+	"github.com/zhaohuxing/minio/cmd/logger/target/console"
+	xnet "github.com/zhaohuxing/minio/pkg/net"
+	"github.com/zhaohuxing/minio/pkg/pubsub"
 )
 
 // number of log messages to buffer

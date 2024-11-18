@@ -17,8 +17,8 @@
 package iampolicy
 
 import (
-	"github.com/minio/minio/pkg/bucket/policy"
-	"github.com/minio/minio/pkg/bucket/policy/condition"
+	"github.com/zhaohuxing/minio/pkg/bucket/policy"
+	"github.com/zhaohuxing/minio/pkg/bucket/policy/condition"
 )
 
 // Policy claim constants

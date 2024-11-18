@@ -25,7 +25,7 @@ import (
 	"testing"
 
 	"github.com/dustin/go-humanize"
-	"github.com/minio/minio/pkg/kms"
+	"github.com/zhaohuxing/minio/pkg/kms"
 )
 
 // Return pointer to testOneByteReadEOF{}

@@ -26,7 +26,7 @@ import (
 	"io"
 
 	"github.com/minio/highwayhash"
-	"github.com/minio/minio/cmd/logger"
+	"github.com/zhaohuxing/minio/cmd/logger"
 	"golang.org/x/crypto/blake2b"
 )
 

@@ -68,8 +68,8 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib" // Register postgres driver
 
-	"github.com/minio/minio/pkg/event"
-	xnet "github.com/minio/minio/pkg/net"
+	"github.com/zhaohuxing/minio/pkg/event"
+	xnet "github.com/zhaohuxing/minio/pkg/net"
 )
 
 const (

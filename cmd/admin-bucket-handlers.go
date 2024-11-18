@@ -23,9 +23,9 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
-	"github.com/minio/minio/cmd/logger"
-	iampolicy "github.com/minio/minio/pkg/iam/policy"
-	"github.com/minio/minio/pkg/madmin"
+	"github.com/zhaohuxing/minio/cmd/logger"
+	iampolicy "github.com/zhaohuxing/minio/pkg/iam/policy"
+	"github.com/zhaohuxing/minio/pkg/madmin"
 )
 
 const (

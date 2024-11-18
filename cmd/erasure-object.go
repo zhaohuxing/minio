@@ -29,13 +29,13 @@ import (
 	"time"
 
 	"github.com/minio/minio-go/v7/pkg/tags"
-	xhttp "github.com/minio/minio/cmd/http"
-	"github.com/minio/minio/cmd/logger"
-	"github.com/minio/minio/pkg/bucket/lifecycle"
-	"github.com/minio/minio/pkg/bucket/replication"
-	"github.com/minio/minio/pkg/madmin"
-	"github.com/minio/minio/pkg/mimedb"
-	"github.com/minio/minio/pkg/sync/errgroup"
+	xhttp "github.com/zhaohuxing/minio/cmd/http"
+	"github.com/zhaohuxing/minio/cmd/logger"
+	"github.com/zhaohuxing/minio/pkg/bucket/lifecycle"
+	"github.com/zhaohuxing/minio/pkg/bucket/replication"
+	"github.com/zhaohuxing/minio/pkg/madmin"
+	"github.com/zhaohuxing/minio/pkg/mimedb"
+	"github.com/zhaohuxing/minio/pkg/sync/errgroup"
 )
 
 // list all errors which can be ignored in object operations.

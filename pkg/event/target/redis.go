@@ -26,7 +26,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/minio/minio/pkg/event"
+	"github.com/zhaohuxing/minio/pkg/event"
 	"github.com/redis/go-redis/v9"
 )
 

@@ -27,8 +27,8 @@ import (
 	"strings"
 
 	"github.com/gorilla/mux"
-	"github.com/minio/minio/cmd/logger"
-	xioutil "github.com/minio/minio/pkg/ioutil"
+	"github.com/zhaohuxing/minio/cmd/logger"
+	xioutil "github.com/zhaohuxing/minio/pkg/ioutil"
 )
 
 // WalkDirOptions provides options for WalkDir operations.

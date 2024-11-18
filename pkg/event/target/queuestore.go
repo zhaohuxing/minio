@@ -25,8 +25,8 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/minio/minio/pkg/event"
-	"github.com/minio/minio/pkg/sys"
+	"github.com/zhaohuxing/minio/pkg/event"
+	"github.com/zhaohuxing/minio/pkg/sys"
 )
 
 const (

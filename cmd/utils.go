@@ -42,12 +42,12 @@ import (
 
 	humanize "github.com/dustin/go-humanize"
 	"github.com/gorilla/mux"
-	xhttp "github.com/minio/minio/cmd/http"
-	"github.com/minio/minio/cmd/logger"
-	"github.com/minio/minio/cmd/rest"
-	"github.com/minio/minio/pkg/certs"
-	"github.com/minio/minio/pkg/handlers"
-	"github.com/minio/minio/pkg/madmin"
+	xhttp "github.com/zhaohuxing/minio/cmd/http"
+	"github.com/zhaohuxing/minio/cmd/logger"
+	"github.com/zhaohuxing/minio/cmd/rest"
+	"github.com/zhaohuxing/minio/pkg/certs"
+	"github.com/zhaohuxing/minio/pkg/handlers"
+	"github.com/zhaohuxing/minio/pkg/madmin"
 	"golang.org/x/net/http2"
 )
 

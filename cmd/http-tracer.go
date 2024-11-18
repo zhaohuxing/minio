@@ -30,10 +30,10 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/minio/minio/cmd/logger"
-	"github.com/minio/minio/pkg/handlers"
-	jsonrpc "github.com/minio/minio/pkg/rpc"
-	trace "github.com/minio/minio/pkg/trace"
+	"github.com/zhaohuxing/minio/cmd/logger"
+	"github.com/zhaohuxing/minio/pkg/handlers"
+	jsonrpc "github.com/zhaohuxing/minio/pkg/rpc"
+	trace "github.com/zhaohuxing/minio/pkg/trace"
 )
 
 // recordRequest - records the first recLen bytes
@@ -94,7 +94,7 @@ func redactLDAPPwd(s string) string {
 
 // getOpName sanitizes the operation name for mc
 func getOpName(name string) (op string) {
-	op = strings.TrimPrefix(name, "github.com/minio/minio/cmd.")
+	op = strings.TrimPrefix(name, "github.com/zhaohuxing/minio/cmd.")
 	op = strings.TrimSuffix(op, "Handler-fm")
 	op = strings.Replace(op, "objectAPIHandlers", "s3", 1)
 	op = strings.Replace(op, "adminAPIHandlers", "admin", 1)

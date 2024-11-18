@@ -30,18 +30,18 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/minio/minio/pkg/fips"
+	"github.com/zhaohuxing/minio/pkg/fips"
 
 	"github.com/minio/cli"
-	"github.com/minio/minio/cmd/config"
-	xhttp "github.com/minio/minio/cmd/http"
-	"github.com/minio/minio/cmd/logger"
-	"github.com/minio/minio/cmd/rest"
-	"github.com/minio/minio/pkg/auth"
-	"github.com/minio/minio/pkg/bucket/bandwidth"
-	"github.com/minio/minio/pkg/certs"
-	"github.com/minio/minio/pkg/color"
-	"github.com/minio/minio/pkg/env"
+	"github.com/zhaohuxing/minio/cmd/config"
+	xhttp "github.com/zhaohuxing/minio/cmd/http"
+	"github.com/zhaohuxing/minio/cmd/logger"
+	"github.com/zhaohuxing/minio/cmd/rest"
+	"github.com/zhaohuxing/minio/pkg/auth"
+	"github.com/zhaohuxing/minio/pkg/bucket/bandwidth"
+	"github.com/zhaohuxing/minio/pkg/certs"
+	"github.com/zhaohuxing/minio/pkg/color"
+	"github.com/zhaohuxing/minio/pkg/env"
 )
 
 // ServerFlags - server command specific flags

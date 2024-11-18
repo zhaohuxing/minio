@@ -25,9 +25,9 @@ import (
 	"strings"
 
 	"github.com/minio/minio-go/v7/pkg/set"
-	"github.com/minio/minio/cmd/config"
-	"github.com/minio/minio/cmd/logger"
-	xnet "github.com/minio/minio/pkg/net"
+	"github.com/zhaohuxing/minio/cmd/config"
+	"github.com/zhaohuxing/minio/cmd/logger"
+	xnet "github.com/zhaohuxing/minio/pkg/net"
 )
 
 // mustSplitHostPort is a wrapper to net.SplitHostPort() where error is assumed to be a fatal.

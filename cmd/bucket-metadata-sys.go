@@ -24,17 +24,17 @@ import (
 	"sync"
 
 	"github.com/minio/minio-go/v7/pkg/tags"
-	"github.com/minio/minio/cmd/crypto"
-	"github.com/minio/minio/cmd/logger"
-	bucketsse "github.com/minio/minio/pkg/bucket/encryption"
-	"github.com/minio/minio/pkg/bucket/lifecycle"
-	objectlock "github.com/minio/minio/pkg/bucket/object/lock"
-	"github.com/minio/minio/pkg/bucket/policy"
-	"github.com/minio/minio/pkg/bucket/replication"
-	"github.com/minio/minio/pkg/bucket/versioning"
-	"github.com/minio/minio/pkg/event"
-	"github.com/minio/minio/pkg/madmin"
-	"github.com/minio/minio/pkg/sync/errgroup"
+	"github.com/zhaohuxing/minio/cmd/crypto"
+	"github.com/zhaohuxing/minio/cmd/logger"
+	bucketsse "github.com/zhaohuxing/minio/pkg/bucket/encryption"
+	"github.com/zhaohuxing/minio/pkg/bucket/lifecycle"
+	objectlock "github.com/zhaohuxing/minio/pkg/bucket/object/lock"
+	"github.com/zhaohuxing/minio/pkg/bucket/policy"
+	"github.com/zhaohuxing/minio/pkg/bucket/replication"
+	"github.com/zhaohuxing/minio/pkg/bucket/versioning"
+	"github.com/zhaohuxing/minio/pkg/event"
+	"github.com/zhaohuxing/minio/pkg/madmin"
+	"github.com/zhaohuxing/minio/pkg/sync/errgroup"
 )
 
 // BucketMetadataSys captures all bucket metadata for a given cluster.

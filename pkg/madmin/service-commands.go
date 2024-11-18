@@ -25,7 +25,7 @@ import (
 	"strconv"
 	"time"
 
-	trace "github.com/minio/minio/pkg/trace"
+	trace "github.com/zhaohuxing/minio/pkg/trace"
 )
 
 // ServiceRestart - restarts the MinIO cluster
